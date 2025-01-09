@@ -419,66 +419,10 @@ impl<'a, S: Shape, E> Iterator for NdIterMut<'a, S, E> {
     }
 }
 
-/*
-impl<'a, S: Shape, E, D: AsRef<[E]>> IntoIterator for &'a TensorView<'_, S, E, D> {
-    type Item = &'a E;
-    type IntoIter = TensorIter<'a, S, E, D>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        TensorIter::new(self.parameters(), self.data())
-    }
-}
-
-impl<'a, S: Shape, E, D: AsRef<[E]>> IntoIterator for &'a Tensor<S, E, D> {
-    type Item = &'a E;
-    type IntoIter = TensorIter<'a, S, E, D>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        TensorIter::new(self.parameters(), self.data())
-    }
-}
-*/
-
-/*
-impl<'a, S: Shape, E, D: AsRef<[E]>> IntoIterator for &'a TensorViewMut<'a, S, E, D> {
-    type Item = &'a E;
-    type IntoIter = TensorIter<'a, S, E, D>;
-
-    fn into_iter(self) -> Self::IntoIter {
-        TensorView {
-            parameters: self.parameters.clone(),
-            data: self.data,
-        }
-        .iter()
-    }
-}
-*/
-
-pub fn bernstein_coef<S: Shape, E, DIN, DOUT>(c_m: NdArray<S, E, DIN>) -> NdArray<S, E, DOUT> {
-    todo!();
-    /*
-    (tensor_product(D::zero()..=i))
-        .map(|j| {
-            let num: usize = i
-                .into_iter()
-                .zip(j.into_iter())
-                .map(|(i_n, j_n)| binomial(i_n, j_n))
-                .product();
-            let den: usize = D::shape()
-                .into_iter()
-                .zip(j.into_iter())
-                .map(|(d_n, j_n)| binomial(d_n, j_n))
-                .product();
-            (num as f32) / (den as f32)
-        })
-        .sum()
-    */
-}
-
 #[cfg(test)]
 mod test {
 
-    use crate::{Const, NdArray};
+    use crate::{Const, NdArray, Shape};
     use std::marker::PhantomData;
 
     #[test]
@@ -499,95 +443,25 @@ mod test {
             dbg!(e);
         }
     }
-}
 
-fn main() {
-    /*
-    struct Vector<const N: usize>([f32; N]);
-    impl<const N: usize> Tensor for Vector<N> {
-        type Shape = (Const<N>,);
-        type Item = f32;
-
-        fn shape(&self) -> Self::Shape {
-            Default::default()
-        }
+    fn bernstein_coef<S: Shape, E, DIN, DOUT>(c_m: NdArray<S, E, DIN>) -> NdArray<S, E, DOUT> {
+        todo!();
+        /*
+        (tensor_product(D::zero()..=i))
+            .map(|j| {
+                let num: usize = i
+                    .into_iter()
+                    .zip(j.into_iter())
+                    .map(|(i_n, j_n)| binomial(i_n, j_n))
+                    .product();
+                let den: usize = D::shape()
+                    .into_iter()
+                    .zip(j.into_iter())
+                    .map(|(d_n, j_n)| binomial(d_n, j_n))
+                    .product();
+                (num as f32) / (den as f32)
+            })
+            .sum()
+        */
     }
-    impl<const N: usize> Index<[usize; 1]> for Vector<N> {
-        type Output = f32;
-        fn index(&self, i: [usize; 1]) -> &Self::Output {
-            &self.0[i[0]]
-        }
-    }
-
-    impl<const N: usize> Neg for Vector<N> {
-        type Output = Vector<N>;
-
-        fn neg(self) -> Self::Output {
-            for item in self.iter_mut() {
-                item = -item;
-            }
-            self
-        }
-    }
-
-    impl<const N: usize> Add<Vector<N>> for Vector<N> {
-        type Output = Vector<N>;
-        fn add(self, other: Vector<N>) {
-            Vector<N>::from_fn(|i| )
-        }
-    }
-
-    struct Matrix<const N: usize, const M: usize>([[f32; M]; N]);
-    impl<const N: usize, const M: usize> Tensor for Matrix<N, M> {
-        type Shape = (Const<N>, Const<M>);
-        type Item = f32;
-        fn shape(&self) -> Self::Shape {
-            Default::default()
-        }
-    }
-    impl<const N: usize, const M: usize> Index<[usize; 2]> for Matrix<N, M> {
-        type Output = f32;
-        fn index(&self, i: [usize; 2]) -> &Self::Output {
-            &self.0[i[0]][i[1]]
-        }
-    }
-    */
-
-    let mut t = NdArray {
-        shape: (Const::<2>, Const::<2>),
-        element: PhantomData::<i32>,
-        data: vec![1, 2, 3, 4],
-    };
-
-    for e in &t {
-        dbg!(e);
-    }
-    for e in &mut t {
-        *e *= 2;
-    }
-    for e in &t {
-        dbg!(e);
-    }
-
-    /*
-    let mut t2 = t.view_mut();
-
-    let t3 = &mut t2;
-
-    t3[[1, 0]] = 5;
-
-    //dbg!(&t2);
-    //dbg!(t2[[1, 0]]);
-    //dbg!(t2[[1, 0]]);
-    //t2[[1, 0]] = 5;
-    //dbg!(t2[[1, 0]]);
-    //
-
-    let mut i = [0; 2];
-    let shape = (Const::<3>, Const::<4>);
-    for _ in 0..20 {
-        dbg!(i);
-        i = i.next_index(&shape).unwrap();
-    }
-    */
 }
