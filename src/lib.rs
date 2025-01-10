@@ -242,43 +242,33 @@ impl<D1: Dim, D2: Dim> Shape for (D1, D2) {
 
 /////////////////////////////////////////////
 
-#[derive(Debug)]
-pub struct ViewParameters<S: Shape, E> {
-    shape: S,
-    element: marker::PhantomData<E>,
-    offset: usize,
-    strides: S::Index,
-}
-
-impl<S: Shape, E> Clone for ViewParameters<S, E> {
-    fn clone(&self) -> ViewParameters<S, E> {
-        ViewParameters {
-            shape: self.shape.clone(),
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides,
-        }
-    }
-}
-
-// Wrappers for parameters + data
+// Wrappers for array data
 // Three kinds: owned, ref, mut
 
 #[derive(Debug, Clone)]
 pub struct Array<S: Shape, E, D> {
-    parameters: ViewParameters<S, E>,
+    shape: S,
+    element: marker::PhantomData<E>,
+    offset: usize,
+    strides: S::Index,
     data: D,
 }
 
 #[derive(Debug)]
 pub struct View<'a, S: Shape, E, D> {
-    parameters: ViewParameters<S, E>,
+    shape: S,
+    element: marker::PhantomData<E>,
+    offset: usize,
+    strides: S::Index,
     data: &'a D,
 }
 
 #[derive(Debug)]
 pub struct ViewMut<'a, S: Shape, E, D> {
-    parameters: ViewParameters<S, E>,
+    shape: S,
+    element: marker::PhantomData<E>,
+    offset: usize,
+    strides: S::Index,
     data: &'a mut D,
 }
 
@@ -288,15 +278,7 @@ pub trait IntoView {
     type Element;
     type Data;
 
-    fn parameters(&self) -> ViewParameters<Self::Shape, Self::Element>;
-    fn data(&self) -> &Self::Data;
-
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
-        View {
-            parameters: self.parameters(),
-            data: self.data(),
-        }
-    }
+    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data>;
 }
 
 impl<S: Shape, E, D> IntoView for Array<S, E, D> {
@@ -304,12 +286,14 @@ impl<S: Shape, E, D> IntoView for Array<S, E, D> {
     type Element = E;
     type Data = D;
 
-    fn parameters(&self) -> ViewParameters<Self::Shape, Self::Element> {
-        self.parameters.clone()
-    }
-
-    fn data(&self) -> &D {
-        &self.data
+    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+        View {
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.offset,
+            strides: self.strides,
+            data: &self.data,
+        }
     }
 }
 
@@ -318,12 +302,14 @@ impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
     type Element = E;
     type Data = D;
 
-    fn parameters(&self) -> ViewParameters<Self::Shape, Self::Element> {
-        self.parameters.clone()
-    }
-
-    fn data(&self) -> &D {
-        self.data
+    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+        View {
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.offset,
+            strides: self.strides,
+            data: self.data,
+        }
     }
 }
 
@@ -332,66 +318,53 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
     type Element = E;
     type Data = D;
 
-    fn parameters(&self) -> ViewParameters<Self::Shape, Self::Element> {
-        self.parameters.clone()
-    }
-
-    fn data(&self) -> &D {
-        self.data
+    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+        View {
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.offset,
+            strides: self.strides,
+            data: self.data,
+        }
     }
 }
 
 // Get a mutable view
 pub trait IntoViewMut: IntoView {
-    fn data_mut(&mut self) -> &mut Self::Data;
+    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data>;
+}
 
+impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
     fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
         ViewMut {
-            parameters: self.parameters(),
-            data: self.data_mut(),
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.offset,
+            strides: self.strides,
+            data: &mut self.data,
         }
     }
 }
 
-impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
-    fn data_mut(&mut self) -> &mut D {
-        &mut self.data
-    }
-}
-
 impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
-    fn data_mut(&mut self) -> &mut D {
-        self.data
+    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
+        ViewMut {
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.offset,
+            strides: self.strides,
+            data: self.data,
+        }
     }
 }
 
 /////////////////////////////////////////////
 
-impl<S: Shape, E> ViewParameters<S, E> {
-    unsafe fn get_unchecked<'a>(&self, data: &'a [E], index: S::Index) -> &'a E {
-        data.get_unchecked(self.offset + index.to_i(&self.strides))
-    }
-
-    unsafe fn get_unchecked_mut<'a>(&mut self, data: &'a mut [E], index: S::Index) -> &'a mut E {
-        data.get_unchecked_mut(self.offset + index.to_i(&self.strides))
-    }
-
-    fn index<'a>(&self, data: &'a [E], index: S::Index) -> &'a E {
-        index.out_of_bounds_fail(&self.shape);
-        unsafe { self.get_unchecked(data, index) }
-    }
-
-    fn index_mut<'a>(&mut self, data: &'a mut [E], index: S::Index) -> &'a mut E {
-        index.out_of_bounds_fail(&self.shape);
-        unsafe { self.get_unchecked_mut(data, index) }
-    }
-}
-
 macro_rules! impl_view_methods {
     ($struct:ident $(<$lt:lifetime>)?) => {
         impl<S: Shape, E, D: AsRef<[E]>> $struct<$($lt,)? S, E, D> {
             pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
-                self.parameters().get_unchecked(self.data().as_ref(), idx)
+                self.data.as_ref().get_unchecked(self.offset + idx.to_i(&self.strides))
             }
         }
 
@@ -399,7 +372,8 @@ macro_rules! impl_view_methods {
             type Output = E;
 
             fn index(&self, idx: S::Index) -> &E {
-                self.parameters().index(self.data().as_ref(), idx)
+                idx.out_of_bounds_fail(&self.shape);
+                unsafe { self.get_unchecked(idx) }
             }
         }
 
@@ -408,7 +382,12 @@ macro_rules! impl_view_methods {
             type IntoIter = NdIter<'a, S, E>;
 
             fn into_iter(self) -> Self::IntoIter {
-                NdIter::new(self.parameters(), self.data().as_ref())
+                NdIter {
+                    shape: self.shape.clone(),
+                    strides: self.strides,
+                    data: &self.data.as_ref()[self.offset..],
+                    idx: (..self.shape.value()).first(),
+                }
             }
         }
     };
@@ -417,14 +396,15 @@ macro_rules! impl_view_methods {
 macro_rules! impl_view_mut_methods {
     ($struct:ident $(<$lt:lifetime>)?) => {
         impl<S: Shape, E, D: AsRef<[E]> + AsMut<[E]>> $struct<$($lt,)? S, E, D> {
-            pub unsafe fn get_unchecked_mut(&mut self, idx: S::Index) -> &E {
-                self.parameters().get_unchecked_mut(self.data_mut().as_mut(), idx)
+            pub unsafe fn get_unchecked_mut(&mut self, idx: S::Index) -> &mut E {
+                self.data.as_mut().get_unchecked_mut(self.offset + idx.to_i(&self.strides))
             }
         }
 
         impl<S: Shape, E, D: AsRef<[E]> + AsMut<[E]>> ops::IndexMut<S::Index> for $struct<$($lt,)? S, E, D> {
             fn index_mut(&mut self, idx: S::Index) -> &mut E {
-                self.parameters().index_mut(self.data_mut().as_mut(), idx)
+                idx.out_of_bounds_fail(&self.shape);
+                unsafe { self.get_unchecked_mut(idx) }
             }
         }
 
@@ -433,7 +413,12 @@ macro_rules! impl_view_mut_methods {
             type IntoIter = NdIterMut<'a, S, E>;
 
             fn into_iter(self) -> Self::IntoIter {
-                NdIterMut::new(self.parameters(), self.data_mut().as_mut())
+                NdIterMut {
+                    shape: self.shape.clone(),
+                    strides: self.strides,
+                    data: &mut self.data.as_mut()[self.offset..],
+                    idx: (..self.shape.value()).first(),
+                }
             }
         }
     };
@@ -449,21 +434,13 @@ impl_view_mut_methods!(Array);
 /////////////////////////////////////////////
 
 pub struct NdIter<'a, S: Shape, E> {
-    parameters: ViewParameters<S, E>,
+    shape: S,
+    strides: S::Index,
     data: &'a [E],
     idx: Option<S::Index>,
 }
 
 impl<'a, S: Shape, E> NdIter<'a, S, E> {
-    fn new(parameters: ViewParameters<S, E>, data: &'a [E]) -> Self {
-        let idx = (parameters.shape.num_elements() > 0).then_some(S::Index::zero());
-        NdIter {
-            parameters,
-            data,
-            idx,
-        }
-    }
-
     pub fn nd_enumerate(self) -> NdEnumerate<Self> {
         NdEnumerate(self)
     }
@@ -474,28 +451,21 @@ impl<'a, S: Shape, E> Iterator for NdIter<'a, S, E> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.idx?;
-        let val = unsafe { self.parameters.get_unchecked(self.data, idx) };
-        self.idx = (..self.parameters.shape.value()).next(idx);
+
+        let val = unsafe { self.data.get_unchecked(idx.to_i(&self.strides)) };
+        self.idx = (..self.shape.value()).next(idx);
         Some(val)
     }
 }
 
 pub struct NdIterMut<'a, S: Shape, E> {
-    parameters: ViewParameters<S, E>,
+    shape: S,
+    strides: S::Index,
     data: &'a mut [E],
     idx: Option<S::Index>,
 }
 
 impl<'a, S: Shape, E> NdIterMut<'a, S, E> {
-    fn new(parameters: ViewParameters<S, E>, data: &'a mut [E]) -> Self {
-        let idx = (parameters.shape.num_elements() > 0).then_some(S::Index::zero());
-        NdIterMut {
-            parameters,
-            data,
-            idx,
-        }
-    }
-
     pub fn nd_enumerate(self) -> NdEnumerate<Self> {
         NdEnumerate(self)
     }
@@ -506,8 +476,8 @@ impl<'a, S: Shape, E> Iterator for NdIterMut<'a, S, E> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.idx?;
-        let val = unsafe { &mut *(self.parameters.get_unchecked_mut(self.data, idx) as *mut E) };
-        self.idx = (..self.parameters.shape.value()).next(idx);
+        let val = unsafe { &mut *(self.data.get_unchecked_mut(idx.to_i(&self.strides)) as *mut E) };
+        self.idx = (..self.shape.value()).next(idx);
         Some(val)
     }
 }
@@ -519,8 +489,8 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIter<'a, S, E>> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.0.idx?;
-        let val = unsafe { self.0.parameters.get_unchecked(self.0.data, idx) };
-        self.0.idx = (..self.0.parameters.shape.value()).next(idx);
+        let val = unsafe { self.0.data.get_unchecked(idx.to_i(&self.0.strides)) };
+        self.0.idx = (..self.0.shape.value()).next(idx);
         Some((idx, val))
     }
 }
@@ -531,8 +501,8 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.0.idx?;
         let val =
-            unsafe { &mut *(self.0.parameters.get_unchecked_mut(self.0.data, idx) as *mut E) };
-        self.0.idx = (..self.0.parameters.shape.value()).next(idx);
+            unsafe { &mut *(self.0.data.get_unchecked_mut(idx.to_i(&self.0.strides)) as *mut E) };
+        self.0.idx = (..self.0.shape.value()).next(idx);
         Some((idx, val))
     }
 }
@@ -569,7 +539,7 @@ impl<'a, S: Shape, E, D> IntoTarget for &'a mut Array<S, E, D> {
     type Output = ();
 
     fn build(self, shape: &Self::Shape) -> Self::Target {
-        self.parameters.shape.shape_mismatch_fail(shape);
+        self.shape.shape_mismatch_fail(shape);
         self.view_mut()
     }
 }
@@ -583,7 +553,7 @@ impl<'a, S: Shape, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
     type Output = ();
 
     fn build(self, shape: &Self::Shape) -> Self::Target {
-        self.parameters.shape.shape_mismatch_fail(shape);
+        self.shape.shape_mismatch_fail(shape);
         self.view_mut()
     }
 }
@@ -612,12 +582,10 @@ impl<'a, S: Shape, E: Default + Clone> IntoTarget for Alloc<S, E> {
 
     fn build(self, shape: &Self::Shape) -> Self::Target {
         Array {
-            parameters: ViewParameters {
-                shape: shape.clone(),
-                strides: shape.default_strides(),
-                element: marker::PhantomData,
-                offset: 0,
-            },
+            shape: shape.clone(),
+            strides: shape.default_strides(),
+            element: marker::PhantomData,
+            offset: 0,
             data: vec![E::default(); shape.num_elements()],
         }
     }
@@ -655,19 +623,16 @@ mod test {
 
     use crate::{
         alloc, Array, Const, DefiniteRange, IntoTarget, IntoView, IntoViewMut, OutTarget, Shape,
-        ViewParameters,
     };
     use std::marker::PhantomData;
 
     #[test]
     fn test() {
         let mut t = Array {
-            parameters: ViewParameters {
-                shape: (Const::<2>, Const::<2>),
-                strides: (Const::<2>, Const::<2>).default_strides(),
-                element: PhantomData::<i32>,
-                offset: 0,
-            },
+            shape: (Const::<2>, Const::<2>),
+            strides: (Const::<2>, Const::<2>).default_strides(),
+            element: PhantomData::<i32>,
+            offset: 0,
             data: vec![1, 2, 3, 4],
         };
 
@@ -700,7 +665,7 @@ mod test {
         ) -> O::Output {
             let c_m = c_m.view();
 
-            let mut target = out.build(&c_m.parameters.shape);
+            let mut target = out.build(&c_m.shape);
             let mut out_view = target.view_mut();
 
             // XXX
@@ -716,7 +681,6 @@ mod test {
                             .map(|(i_n, j_n)| binomial(i_n, j_n))
                             .product();
                         let den: usize = c_m
-                            .parameters
                             .shape
                             .value()
                             .into_iter()
@@ -735,23 +699,19 @@ mod test {
         // TEST DATA
 
         let a = Array {
-            parameters: ViewParameters {
-                shape: (Const::<2>, Const::<2>),
-                strides: (Const::<2>, Const::<2>).default_strides(),
-                element: PhantomData,
-                offset: 0,
-            },
+            shape: (Const::<2>, Const::<2>),
+            strides: (Const::<2>, Const::<2>).default_strides(),
+            element: PhantomData,
+            offset: 0,
             data: vec![1., 2., 3., 4.],
         };
 
         /*
         let mut b = Array {
-            parameters: ViewParameters {
-                shape: (Const::<2>, Const::<2>),
-                strides: (Const::<2>, Const::<2>).default_strides(),
-                element: PhantomData,
-                offset: 0,
-            },
+            shape: (Const::<2>, Const::<2>),
+            strides: (Const::<2>, Const::<2>).default_strides(),
+            element: PhantomData,
+            offset: 0,
             data: vec![0.; 4],
         };
         */
