@@ -32,7 +32,7 @@ impl Dim for usize {
 
 /// The shape of an ndarray, e.g. a 2D statically-sized array might have shape (Const<3>, Const<2>)
 /// or a 3D dynamically-sized array might have shape (3, 4, 5)
-pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug {
+pub trait Shape: 'static + Sized + Clone + fmt::Debug {
     /// This type is [usize; Self::NUM_DIMS] but rust doesn't allow that :(
     type Index: NdIndex;
 
@@ -55,6 +55,14 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug {
         }
         result
     }
+
+    fn shape_mismatch_fail(&self, other: &Self) {
+        let expected = self.value();
+        let got = other.value();
+        if expected != got {
+            panic!("Shapes do not match: expected={expected:?} got={got:?}");
+        }
+    }
 }
 
 pub trait NdIndex:
@@ -64,6 +72,8 @@ pub trait NdIndex:
     + IntoIterator<Item = usize, IntoIter: DoubleEndedIterator + ExactSizeIterator>
     + Index<usize, Output = usize>
     + IndexMut<usize>
+    + PartialEq<Self>
+    + Eq
 {
     // Required methods:
     fn zero() -> Self;
@@ -153,21 +163,10 @@ pub struct NdViewParameters<S: Shape, E> {
 impl<S: Shape, E> Clone for NdViewParameters<S, E> {
     fn clone(&self) -> NdViewParameters<S, E> {
         NdViewParameters {
-            shape: self.shape,
+            shape: self.shape.clone(),
             element: PhantomData,
             offset: self.offset,
             strides: self.strides,
-        }
-    }
-}
-
-impl<S: Shape, E> NdViewParameters<S, E> {
-    pub fn from_array<D>(t: &NdArray<S, E, D>) -> NdViewParameters<S, E> {
-        NdViewParameters {
-            shape: t.shape,
-            element: PhantomData,
-            offset: 0,
-            strides: S::default_strides(&t.shape),
         }
     }
 }
@@ -177,8 +176,7 @@ impl<S: Shape, E> NdViewParameters<S, E> {
 
 #[derive(Debug, Clone)]
 pub struct NdArray<S: Shape, E, D> {
-    shape: S,
-    element: PhantomData<E>,
+    parameters: NdViewParameters<S, E>,
     data: D,
 }
 
@@ -217,7 +215,7 @@ impl<S: Shape, E, D> View for NdArray<S, E, D> {
     type Data = D;
 
     fn parameters(&self) -> NdViewParameters<Self::Shape, Self::Element> {
-        NdViewParameters::from_array(self)
+        self.parameters.clone()
     }
 
     fn data(&self) -> &D {
@@ -419,17 +417,102 @@ impl<'a, S: Shape, E> Iterator for NdIterMut<'a, S, E> {
     }
 }
 
+/////////////////////////////////////////////
+
+pub trait TargetDescriptor {
+    type Shape: Shape;
+    type Element;
+    type Data;
+
+    type Target: View<Shape = Self::Shape, Element = Self::Element, Data = Self::Data> + ViewMut;
+    type Output;
+
+    fn build(self, shape: &Self::Shape) -> Self::Target;
+    fn output(target: Self::Target) -> Self::Output;
+}
+
+impl<'a, S: Shape, E, D> TargetDescriptor for &'a mut NdArray<S, E, D> {
+    type Shape = S;
+    type Element = E;
+    type Data = D;
+
+    type Target = NdViewMut<'a, S, E, D>;
+    type Output = ();
+
+    fn build(self, shape: &Self::Shape) -> Self::Target {
+        self.parameters.shape.shape_mismatch_fail(shape);
+        self.view_mut()
+    }
+    fn output(_target: Self::Target) -> Self::Output {
+        ()
+    }
+}
+
+impl<'a, S: Shape, E, D> TargetDescriptor for &'a mut NdViewMut<'a, S, E, D> {
+    type Shape = S;
+    type Element = E;
+    type Data = D;
+
+    type Target = NdViewMut<'a, S, E, D>;
+    type Output = ();
+
+    fn build(self, shape: &Self::Shape) -> Self::Target {
+        self.parameters.shape.shape_mismatch_fail(shape);
+        self.view_mut()
+    }
+    fn output(_target: Self::Target) -> Self::Output {
+        ()
+    }
+}
+
+pub struct Alloc<S: Shape, E>(PhantomData<(S, E)>);
+
+pub fn alloc<S: Shape, E>() -> Alloc<S, E> {
+    Alloc(PhantomData)
+}
+
+impl<'a, S: Shape, E: Default + Clone> TargetDescriptor for Alloc<S, E> {
+    type Shape = S;
+    type Element = E;
+    type Data = Vec<E>;
+
+    type Target = NdArray<Self::Shape, Self::Element, Self::Data>;
+    type Output = Self::Target;
+
+    fn build(self, shape: &Self::Shape) -> Self::Target {
+        NdArray {
+            parameters: NdViewParameters {
+                shape: shape.clone(),
+                strides: shape.default_strides(),
+                element: PhantomData,
+                offset: 0,
+            },
+            data: vec![E::default(); shape.num_elements()],
+        }
+    }
+
+    fn output(target: Self::Target) -> Self::Output {
+        target
+    }
+}
+
 #[cfg(test)]
 mod test {
 
-    use crate::{Const, NdArray, Shape};
+    use crate::{
+        Alloc, Const, NdArray, NdIndex, NdViewParameters, Shape, TargetDescriptor, View, ViewMut,
+    };
     use std::marker::PhantomData;
 
     #[test]
     fn test() {
         let mut t = NdArray {
-            shape: (Const::<2>, Const::<2>),
-            element: PhantomData::<i32>,
+            parameters: NdViewParameters {
+                shape: (Const::<2>, Const::<2>),
+                strides: (Const::<2>, Const::<2>).default_strides(),
+                element: PhantomData::<i32>,
+                offset: 0,
+            },
             data: vec![1, 2, 3, 4],
         };
 
@@ -444,24 +527,71 @@ mod test {
         }
     }
 
-    fn bernstein_coef<S: Shape, E, DIN, DOUT>(c_m: NdArray<S, E, DIN>) -> NdArray<S, E, DOUT> {
-        todo!();
-        /*
-        (tensor_product(D::zero()..=i))
-            .map(|j| {
-                let num: usize = i
-                    .into_iter()
-                    .zip(j.into_iter())
-                    .map(|(i_n, j_n)| binomial(i_n, j_n))
-                    .product();
-                let den: usize = D::shape()
-                    .into_iter()
-                    .zip(j.into_iter())
-                    .map(|(d_n, j_n)| binomial(d_n, j_n))
-                    .product();
-                (num as f32) / (den as f32)
-            })
-            .sum()
-        */
+    #[test]
+    fn test_bernstein() {
+        fn bernstein_coef<
+            S: Shape,
+            E: Copy,
+            V: View<Shape = S, Element = E, Data: AsRef<[E]>>,
+            T: TargetDescriptor<Shape = S, Element = E, Data: AsRef<[E]> + AsMut<[E]>>,
+        >(
+            c_m: &V,
+            out: T,
+        ) -> T::Output {
+            let c_m = c_m.view();
+            let mut target = out.build(&c_m.parameters.shape);
+
+            let mut out_view = target.view_mut();
+
+            // XXX
+            let val1 = c_m[<<V as View>::Shape as Shape>::Index::zero()];
+            out_view[<<T::Target as View>::Shape as Shape>::Index::zero()] = val1;
+
+            /*
+            (tensor_product(D::zero()..=i))
+                .map(|j| {
+                    let num: usize = i
+                        .into_iter()
+                        .zip(j.into_iter())
+                        .map(|(i_n, j_n)| binomial(i_n, j_n))
+                        .product();
+                    let den: usize = D::shape()
+                        .into_iter()
+                        .zip(j.into_iter())
+                        .map(|(d_n, j_n)| binomial(d_n, j_n))
+                        .product();
+                    (num as f32) / (den as f32)
+                })
+                .sum()
+            */
+
+            T::output(target)
+        }
+
+        // TEST DATA
+
+        let a = NdArray {
+            parameters: NdViewParameters {
+                shape: (Const::<2>, Const::<2>),
+                strides: (Const::<2>, Const::<2>).default_strides(),
+                element: PhantomData::<i32>,
+                offset: 0,
+            },
+            data: vec![1, 2, 3, 4],
+        };
+
+        let mut b = NdArray {
+            parameters: NdViewParameters {
+                shape: (Const::<2>, Const::<2>),
+                strides: (Const::<2>, Const::<2>).default_strides(),
+                element: PhantomData::<i32>,
+                offset: 0,
+            },
+            data: vec![0; 4],
+        };
+
+        bernstein_coef(&a, &mut b.view_mut());
+        bernstein_coef(&a.view(), &mut b);
+        bernstein_coef(&a.view(), Alloc(PhantomData));
     }
 }
