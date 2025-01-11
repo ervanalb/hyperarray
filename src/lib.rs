@@ -3,7 +3,41 @@ use std::marker; //::PhantomData;
 use std::ops;
 
 /// Represents a single axis dimension of a multi dimensional shape
-pub trait Dim: 'static + Sized + Clone + Copy + fmt::Debug + PartialEq + Eq + Into<usize> {}
+pub trait Dim:
+    'static
+    + Sized
+    + Clone
+    + Copy
+    + fmt::Debug
+    + PartialEq
+    + Eq
+    + Into<usize>
+    + FromDim<usize>
+    + FromDim<Self>
+{
+}
+
+/// This dimension or index can be converted from another dimension or index.
+/// This trait is implemented for all conversions that have some chance of success,
+/// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
+/// It is not implemented for conversions that have no chance of success at compile time
+/// e.g. Const<4> -> Const<3>
+pub trait FromDim<O: Dim>: Sized {
+    fn from_dim(other: O) -> Option<Self>;
+}
+
+pub trait IntoDim<T>: Dim {
+    fn into_dim(self) -> Option<T>;
+}
+
+impl<T: Dim, U> IntoDim<U> for T
+where
+    U: FromDim<T>,
+{
+    fn into_dim(self) -> Option<U> {
+        U::from_dim(self)
+    }
+}
 
 /// Represents a dimension whose length is known at compile time
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
@@ -16,13 +50,37 @@ impl<const N: usize> fmt::Debug for Const<N> {
 }
 
 impl<const M: usize> Dim for Const<M> {}
+impl Dim for usize {}
+
 impl<const M: usize> From<Const<M>> for usize {
     fn from(_: Const<M>) -> Self {
         M
     }
 }
 
-pub trait Index: 'static + Sized + Clone + Copy + fmt::Debug {
+impl<const M: usize> FromDim<usize> for Const<M> {
+    fn from_dim(other: usize) -> Option<Self> {
+        if other == M {
+            Some(Const::<M>)
+        } else {
+            None
+        }
+    }
+}
+
+impl FromDim<usize> for usize {
+    fn from_dim(other: usize) -> Option<usize> {
+        Some(other)
+    }
+}
+
+impl<const M: usize> FromDim<Const<M>> for Const<M> {
+    fn from_dim(other: Const<M>) -> Option<Const<M>> {
+        Some(other)
+    }
+}
+
+pub trait Index: 'static + Sized + Clone + Copy + fmt::Debug + FromIndex<Self> {
     const NUM_DIMENSIONS: usize;
     type Dyn: IndexDyn;
 
@@ -44,7 +102,8 @@ pub trait Index: 'static + Sized + Clone + Copy + fmt::Debug {
         result
     }
 
-    fn shape_mismatch_fail(&self, other: &Self) {
+    fn shape_mismatch_fail(&self, other: impl IntoIndex<Self>) {
+        let other: Self = other.into_index_fail();
         for (i, s) in self.axis_iter().zip(other.axis_iter()) {
             if i != s {
                 panic!("Shapes do not match: expected={self:?} got={other:?}");
@@ -82,45 +141,47 @@ pub trait IndexDyn:
     fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, usize>;
 }
 
-/*
-pub trait Index:
-    Clone
-    + Copy
-    + fmt::Debug
-    + IntoIterator<Item = usize, IntoIter: DoubleEndedIterator + ExactSizeIterator>
-    + ops::Index<usize, Output = usize>
-    + ops::IndexMut<usize>
-    + PartialEq<Self>
-    + Eq
-{
-    // Required methods:
-    fn zero() -> Self;
-    fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, usize>;
+/// This dimension or index can be converted from another dimension or index.
+/// This trait is implemented for all conversions that have some chance of success,
+/// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
+/// It is not implemented for conversions that have no chance of success at compile time
+/// e.g. Const<4> -> Const<3>
+pub trait FromIndex<O: Index>: Sized {
+    // Required methods
 
-    // Provided methods:
-    fn in_bounds<S: Shape<Index = Self>>(&self, shape: &S) -> bool {
-        self.into_iter()
-            .zip(shape.value().into_iter())
-            .all(|(i, s)| i < s)
-    }
+    fn from_index(other: O) -> Option<Self>;
 
-    fn out_of_bounds_fail<S: Shape<Index = Self>>(&self, shape: &S) {
-        for (i, s) in self.into_iter().zip(shape.value().into_iter()) {
-            if i >= s {
-                panic!("Index out of bounds: index={self:?} shape={shape:?}");
-            }
-        }
-    }
+    // Provided methods
 
-    fn to_i(&self, strides: &Self) -> usize {
-        strides
-            .into_iter()
-            .zip(self.into_iter())
-            .map(|(a, b)| a * b)
-            .sum()
+    fn from_index_fail(other: O) -> Self {
+        Self::from_index(other).expect("Shapes are not compatible: expected=TODO got={other:?}")
     }
 }
-*/
+
+pub trait IntoIndex<T>: Index {
+    // Required methods
+    fn into_index(self) -> Option<T>;
+
+    // Provided methods
+    fn into_index_fail(self) -> T;
+}
+
+impl<T: Index, U> IntoIndex<U> for T
+where
+    U: FromIndex<T>,
+{
+    // Required methods
+
+    fn into_index(self) -> Option<U> {
+        U::from_index(self)
+    }
+
+    // Provided methods
+
+    fn into_index_fail(self) -> U {
+        U::from_index_fail(self)
+    }
+}
 
 impl<const N: usize> Index for [usize; N] {
     const NUM_DIMENSIONS: usize = N;
@@ -128,6 +189,12 @@ impl<const N: usize> Index for [usize; N] {
 
     fn d(&self) -> Self::Dyn {
         *self
+    }
+}
+
+impl<const N: usize> FromIndex<[usize; N]> for [usize; N] {
+    fn from_index(other: [usize; N]) -> Option<[usize; N]> {
+        Some(other)
     }
 }
 
@@ -141,38 +208,6 @@ impl<const N: usize> IndexDyn for [usize; N] {
     }
 }
 
-/*
-struct IndexIter<const N: usize> {
-    data: [usize; N],
-    cur: usize,
-    cur_back: usize,
-}
-
-impl<const N: usize> Iterator for IndexIter<N> {
-    type Item = usize;
-    fn next(&mut self) -> Option<usize> {
-        if self.cur + self.cur_back > N {
-            return None;
-        }
-        let val = unsafe { self.data.get_unchecked(self.cur) };
-        self.cur += 1;
-        Some(val)
-    }
-}
-
-impl<const N: usize> DoubleEndedIterator for IndexIter<N> {
-    // Required method
-    fn next_back(&mut self) -> Option<Self::Item> {
-        if self.cur + self.cur_back > N {
-            return None;
-        }
-        let val = unsafe { self.data.get_unchecked(N - self.cur_back) };
-        self.cur_back += 1;
-        Some(val)
-    }
-}
-*/
-
 impl<D1: Dim> Index for (D1,) {
     const NUM_DIMENSIONS: usize = 1;
     type Dyn = [usize; 1];
@@ -182,12 +217,48 @@ impl<D1: Dim> Index for (D1,) {
     }
 }
 
+impl<D1: Dim> FromIndex<(D1,)> for (D1,) {
+    fn from_index(other: (D1,)) -> Option<(D1,)> {
+        Some(other)
+    }
+}
+
+impl<D1: Dim> FromIndex<[usize; 1]> for (D1,) {
+    fn from_index(other: [usize; 1]) -> Option<(D1,)> {
+        Some((other[0].into_dim()?,))
+    }
+}
+
+impl<D1: Dim> FromIndex<(D1,)> for [usize; 1] {
+    fn from_index(other: (D1,)) -> Option<[usize; 1]> {
+        Some(other.d())
+    }
+}
+
 impl<D1: Dim, D2: Dim> Index for (D1, D2) {
     const NUM_DIMENSIONS: usize = 2;
     type Dyn = [usize; 2];
 
     fn d(&self) -> Self::Dyn {
         [self.0.into(), self.1.into()]
+    }
+}
+
+impl<D1: Dim, D2: Dim> FromIndex<(D1, D2)> for (D1, D2) {
+    fn from_index(other: (D1, D2)) -> Option<(D1, D2)> {
+        Some(other)
+    }
+}
+
+impl<D1: Dim, D2: Dim> FromIndex<[usize; 2]> for (D1, D2) {
+    fn from_index(other: [usize; 2]) -> Option<(D1, D2)> {
+        Some((other[0].into_dim()?, other[0].into_dim()?))
+    }
+}
+
+impl<D1: Dim, D2: Dim> FromIndex<(D1, D2)> for [usize; 2] {
+    fn from_index(other: (D1, D2)) -> Option<[usize; 2]> {
+        Some(other.d())
     }
 }
 
@@ -591,7 +662,7 @@ pub trait IntoTarget {
         Output = Self::Output,
     >;
 
-    fn build(self, shape: &Self::Shape) -> Self::Target;
+    fn build(self, shape: impl IntoIndex<Self::Shape>) -> Self::Target;
 }
 
 pub trait OutTarget: IntoView + IntoViewMut {
@@ -607,7 +678,7 @@ impl<'a, S: Index, E, D> IntoTarget for &'a mut Array<S, E, D> {
     type Target = ViewMut<'a, S, E, D>;
     type Output = ();
 
-    fn build(self, shape: &Self::Shape) -> Self::Target {
+    fn build(self, shape: impl IntoIndex<Self::Shape>) -> Self::Target {
         self.shape.shape_mismatch_fail(shape);
         self.view_mut()
     }
@@ -621,7 +692,7 @@ impl<'a, S: Index, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
     type Target = ViewMut<'a, S, E, D>;
     type Output = ();
 
-    fn build(self, shape: &Self::Shape) -> Self::Target {
+    fn build(self, shape: impl IntoIndex<Self::Shape>) -> Self::Target {
         self.shape.shape_mismatch_fail(shape);
         self.view_mut()
     }
@@ -649,9 +720,10 @@ impl<'a, S: Index, E: Default + Clone> IntoTarget for Alloc<S, E> {
     type Target = Array<Self::Shape, Self::Element, Self::Data>;
     type Output = Self::Target;
 
-    fn build(self, shape: &Self::Shape) -> Self::Target {
+    fn build(self, shape: impl IntoIndex<Self::Shape>) -> Self::Target {
+        let shape: Self::Shape = shape.into_index_fail();
         Array {
-            shape: shape.clone(),
+            shape,
             strides: shape.default_strides(),
             element: marker::PhantomData,
             offset: 0,
@@ -734,7 +806,7 @@ mod test {
         ) -> O::Output {
             let c_m = c_m.view();
 
-            let mut target = out.build(&c_m.shape);
+            let mut target = out.build(c_m.shape);
             let mut out_view = target.view_mut();
 
             // XXX
