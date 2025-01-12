@@ -868,74 +868,83 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 /// ```
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut View`.
-pub trait IntoTarget<S: Shape> {
+pub trait IntoTarget {
+    // TODO can we get rid of the explicit reflexivity?
+    type Shape: FromShape<Self::Shape>;
     type Element;
     type Data;
 
     type Output;
-    type Target: OutTarget<S, Element = Self::Element, Data = Self::Data, Output = Self::Output>;
+    type Target: OutTarget<
+        Shape = Self::Shape,
+        Element = Self::Element,
+        Data = Self::Data,
+        Output = Self::Output,
+    >;
 
-    fn build(self, shape: S) -> Self::Target;
+    fn build(self, shape: impl IntoShape<Self::Shape>) -> Self::Target;
 }
 
-pub trait OutTarget<S: Shape>: IntoViewMut<S> {
+pub trait OutTarget: IntoViewMut<Self::Shape> {
     type Output;
+    type Shape: Shape;
     fn output(self) -> Self::Output;
 }
 
 // TODO can we get rid of the explicit reflexivity?
-impl<'a, S: FromShape<S> + FromShape<S2>, S2: Shape, E, D> IntoTarget<S>
-    for &'a mut Array<S2, E, D>
-{
+impl<'a, S: FromShape<S>, E, D> IntoTarget for &'a mut Array<S, E, D> {
+    type Shape = S;
     type Element = E;
     type Data = D;
 
     type Target = ViewMut<'a, S, E, D>;
     type Output = ();
 
-    fn build(self, _shape: S) -> Self::Target {
+    fn build(self, _shape: impl IntoShape<Self::Shape>) -> Self::Target {
         self.view_mut()
     }
 }
 
 // TODO can we get rid of the explicit reflexivity?
-impl<'a, S: FromShape<S> + FromShape<S2>, S2: Shape, E, D> IntoTarget<S>
-    for &'a mut ViewMut<'a, S2, E, D>
-{
+impl<'a, S: FromShape<S>, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
+    type Shape = S;
     type Element = E;
     type Data = D;
 
     type Target = ViewMut<'a, S, E, D>;
     type Output = ();
 
-    fn build(self, _shape: S) -> Self::Target {
+    fn build(self, _shape: impl IntoShape<Self::Shape>) -> Self::Target {
         self.view_mut()
     }
 }
 
-impl<'a, S: FromShape<S2>, S2: Shape, E, D> OutTarget<S> for ViewMut<'a, S2, E, D> {
+// TODO can we get rid of the explicit reflexivity?
+impl<'a, S: FromShape<S>, E, D> OutTarget for ViewMut<'a, S, E, D> {
     type Output = ();
+    type Shape = S;
 
     fn output(self) -> Self::Output {
         ()
     }
 }
 
-pub struct Alloc<E>(marker::PhantomData<E>);
+pub struct Alloc<S, E>(marker::PhantomData<(S, E)>);
 
-pub fn alloc<E>() -> Alloc<E> {
+pub fn alloc<S, E>() -> Alloc<S, E> {
     Alloc(marker::PhantomData)
 }
 
-// TODO get rid of symmetric bound?
-impl<'a, S: FromShape<S>, E: Default + Clone> IntoTarget<S> for Alloc<E> {
+// TODO can we get rid of the explicit reflexivity?
+impl<'a, S: FromShape<S>, E: Default + Clone> IntoTarget for Alloc<S, E> {
+    type Shape = S;
     type Element = E;
     type Data = Vec<E>;
 
     type Target = Array<S, Self::Element, Self::Data>;
     type Output = Self::Target;
 
-    fn build(self, shape: S) -> Self::Target {
+    fn build(self, shape: impl IntoShape<Self::Shape>) -> Self::Target {
         let shape = shape.into_shape_fail();
         Array {
             shape,
@@ -947,8 +956,10 @@ impl<'a, S: FromShape<S>, E: Default + Clone> IntoTarget<S> for Alloc<E> {
     }
 }
 
-impl<S: FromShape<S2>, S2: Shape, E, D> OutTarget<S> for Array<S2, E, D> {
+// TODO can we get rid of the explicit reflexivity?
+impl<S: FromShape<S>, E, D> OutTarget for Array<S, E, D> {
     type Output = Self;
+    type Shape = S;
 
     fn output(self) -> Self::Output {
         self
@@ -978,7 +989,7 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc, Array, Const, DefiniteRange, FromShape, IntoIndex, IntoTarget, IntoView,
+        alloc, Array, AsIndex, Const, DefiniteRange, FromShape, IntoTarget, IntoView,
         IntoViewMut, OutTarget, Shape,
     };
     use std::marker::PhantomData;
@@ -1021,11 +1032,8 @@ mod test {
             numerator / denominator
         }
 
-        fn bernstein_coef<
-            S: Shape,
-            O: IntoTarget<S, Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
-        >(
-            c_m: &impl IntoView<S, Element = f32, Data: AsRef<[f32]>>,
+        fn bernstein_coef<O: IntoTarget<Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>>(
+            c_m: &impl IntoView<O::Shape, Element = f32, Data: AsRef<[f32]>>,
             out: O,
         ) -> O::Output {
             let c_m = c_m.view();
@@ -1053,7 +1061,7 @@ mod test {
                             .map(|(d_n, j_n)| binomial(d_n, j_n))
                             .product();
                         let b = (num as f32) / (den as f32);
-                        b * c_m[j.into_index_fail()]
+                        b * c_m[j]
                     })
                     .sum();
             }
@@ -1083,8 +1091,8 @@ mod test {
         //bernstein_coef(&a.view(), &mut b);
 
         // TODO get rid of this explicit generic?
-        bernstein_coef::<(Const<2>, Const<2>), _>(&a, alloc());
+        bernstein_coef(&a, alloc::<[usize; 2], _>());
 
-        bernstein_coef::<(Const<2>, usize), _>(&a, &mut b);
+        bernstein_coef(&a, &mut b);
     }
 }
