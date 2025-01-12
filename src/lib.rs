@@ -1,8 +1,10 @@
 use std::fmt;
-use std::marker; //::PhantomData;
+use std::marker;
 use std::ops;
 
-/// Represents a single axis dimension of a multi dimensional shape
+/// Represents the dimension of one axis of multi-dimensional data.
+/// These types may represent a constant known at compile-time (e.g. `Const<3>`)
+/// or runtime (e.g. `usize`),
 pub trait Dim:
     'static
     + Sized
@@ -26,11 +28,13 @@ pub trait FromDim<O: Dim>: Sized {
     fn from_dim(other: O) -> Option<Self>;
 }
 
-pub trait IntoDim<T>: Dim {
+/// This dimension or index can be converted into another dimension or index.
+/// See [FromDim]
+pub trait IntoDim<T: Sized>: Dim {
     fn into_dim(self) -> Option<T>;
 }
 
-impl<T: Dim, U> IntoDim<U> for T
+impl<T: Dim, U: Sized> IntoDim<U> for T
 where
     U: FromDim<T>,
 {
@@ -39,7 +43,8 @@ where
     }
 }
 
-/// Represents a dimension whose length is known at compile time
+/// Represents a dimension known at compile time.
+/// The primitive type `usize` is used for a dimension not known at compile time.
 #[derive(Default, Clone, Copy, PartialEq, Eq)]
 pub struct Const<const N: usize>;
 
@@ -49,19 +54,20 @@ impl<const N: usize> fmt::Debug for Const<N> {
     }
 }
 
-impl<const M: usize> Dim for Const<M> {}
+impl<const N: usize> Dim for Const<N> {}
+
 impl Dim for usize {}
 
-impl<const M: usize> From<Const<M>> for usize {
-    fn from(_: Const<M>) -> Self {
-        M
+impl<const N: usize> From<Const<N>> for usize {
+    fn from(_: Const<N>) -> Self {
+        N
     }
 }
 
-impl<const M: usize> FromDim<usize> for Const<M> {
+impl<const N: usize> FromDim<usize> for Const<N> {
     fn from_dim(other: usize) -> Option<Self> {
-        if other == M {
-            Some(Const::<M>)
+        if other == N {
+            Some(Const::<N>)
         } else {
             None
         }
@@ -74,24 +80,53 @@ impl FromDim<usize> for usize {
     }
 }
 
-impl<const M: usize> FromDim<Const<M>> for Const<M> {
-    fn from_dim(other: Const<M>) -> Option<Const<M>> {
+impl<const N: usize> FromDim<Const<N>> for Const<N> {
+    fn from_dim(other: Const<N>) -> Option<Const<N>> {
         Some(other)
     }
 }
 
-pub trait Index: 'static + Sized + Clone + Copy + fmt::Debug + FromIndex<Self> {
-    const NUM_DIMENSIONS: usize;
-    type Dyn: IndexDyn;
+/// Represents dimensions of multi-dimensional data.
+/// These types may represent constants known at compile-time (e.g. (Const<3>, Const<4>))
+/// or runtime (e.g. [usize; 2])
+/// or a mix: (usize, Const<2>)
+///
+/// Note that "index" and "shape" are conceptually the same type,
+/// and this trait represents either.
+pub trait Index:
+    'static + Sized + Clone + Copy + fmt::Debug + FromIndex<Self> + FromIndex<Self::Dyn>
+{
+    /// A compatible run-time representation of this Index.
+    /// For example, (Const<3>, Const<4>)::Dyn would be [usize; 2]
+    type Dyn: IndexDyn + FromIndex<Self>;
 
     // Required methods
+
+    /// Get the value of this index in memory.
+    /// For example, `(Const::<3>, 4).d()` is `[3, 4]`.
+    ///
+    /// One case where this is useful if you want to mutate the values--
+    /// you can't increment the first dimension of `(Const::<3>, 4)`
+    /// but you can increment the first dimension of `[3, 4]`.
     fn d(&self) -> Self::Dyn;
 
     // Provided methods
+
+    /// How many total elements are contained within a multi-dimensional data
+    /// of this shape.
+    /// For example, `[3, 4].num_elements()` is `12`
     fn num_elements(&self) -> usize {
         self.axis_iter().product()
     }
 
+    /// The stride values for multi-dimensional data of this shape.
+    /// This is assuming the data is stored in a C-contiguous fashion,
+    /// where the first axis changes slowest as you traverse the data
+    /// (i.e. has the largest stride.)
+    ///
+    /// For example, [3, 4].strides() is `[4, 1]`
+    /// since moving one unit along the first axis requires a stride of 4 elements,
+    /// and moving one unit along the second axis requires a stride of 1 element.
     fn default_strides(&self) -> Self::Dyn {
         let mut result = Self::Dyn::zero();
         let mut acc = 1;
@@ -102,15 +137,9 @@ pub trait Index: 'static + Sized + Clone + Copy + fmt::Debug + FromIndex<Self> {
         result
     }
 
-    fn shape_mismatch_fail(&self, other: impl IntoIndex<Self>) {
-        let other: Self = other.into_index_fail();
-        for (i, s) in self.axis_iter().zip(other.axis_iter()) {
-            if i != s {
-                panic!("Shapes do not match: expected={self:?} got={other:?}");
-            }
-        }
-    }
-
+    /// Panics if the given index is out-of-bounds for data of this shape.
+    /// This should only be used for comparing shapes
+    /// since the panic message uses that terminology
     fn out_of_bounds_fail(&self, idx: &Self::Dyn) {
         for (i, s) in idx.axis_iter().zip(self.axis_iter()) {
             if i >= s {
@@ -119,6 +148,8 @@ pub trait Index: 'static + Sized + Clone + Copy + fmt::Debug + FromIndex<Self> {
         }
     }
 
+    /// Converts this multi-dimensional index to a 1-dimensional index (usize.)
+    /// No bounds checking is performed.
     fn to_i(&self, strides: &Self) -> usize {
         strides
             .axis_iter()
@@ -127,21 +158,29 @@ pub trait Index: 'static + Sized + Clone + Copy + fmt::Debug + FromIndex<Self> {
             .sum()
     }
 
+    /// Converts this index into an iterator over its components.
+    /// For example, `(Const::<3>, 4).axis_iter()` yields an iterator that returns `3_usize` followed by `4_usize`.
     fn axis_iter(self) -> impl Iterator<Item = usize> + DoubleEndedIterator + ExactSizeIterator {
         IntoIterator::into_iter(self.d())
     }
 }
 
+/// A sub-trait of Index that contains no compile-time constants (all components are stored in memory as `usize`.)
+/// This opens up additional possibilities like indexing with brackets and `iter_mut()`.
 pub trait IndexDyn:
     Index<Dyn = Self>
     + ops::IndexMut<usize>
     + IntoIterator<Item = usize, IntoIter: DoubleEndedIterator + ExactSizeIterator>
 {
+    // TODO I don't think this method is well-formed for dynamic number of dimensions
     fn zero() -> Self;
+
+    /// Returns an iterator over the components of this index,
+    /// that allows modifying the components.
     fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, usize>;
 }
 
-/// This dimension or index can be converted from another dimension or index.
+/// This index can be converted from another index.
 /// This trait is implemented for all conversions that have some chance of success,
 /// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
 /// It is not implemented for conversions that have no chance of success at compile time
@@ -149,24 +188,39 @@ pub trait IndexDyn:
 pub trait FromIndex<O: Index>: Sized {
     // Required methods
 
+    /// Convert to this index from the given compile-time compatible index,
+    /// returning None if they turn out not to be compatible at runtime.
     fn from_index(other: O) -> Option<Self>;
 
     // Provided methods
 
+    /// Convert to this index from the given compile-time compatible index,
+    /// panicking if they turn out not to be compatible at runtime.
     fn from_index_fail(other: O) -> Self {
-        Self::from_index(other).expect("Shapes are not compatible: expected=TODO got={other:?}")
+        Self::from_index(other).unwrap_or_else(|| {
+            panic!(
+                "Shapes are not compatible: type={} got={other:?}",
+                std::any::type_name::<Self>()
+            )
+        })
     }
 }
 
-pub trait IntoIndex<T>: Index {
+pub trait IntoIndex<T: Sized>: Index {
     // Required methods
+
+    /// Convert from this index into the given compile-time compatible index,
+    /// returning None if they turn out not to be compatible at runtime.
     fn into_index(self) -> Option<T>;
 
     // Provided methods
+
+    /// Convert from this index into the given compile-time compatible index,
+    /// panicking if they turn out not to be compatible at runtime.
     fn into_index_fail(self) -> T;
 }
 
-impl<T: Index, U> IntoIndex<U> for T
+impl<T: Index, U: Index> IntoIndex<U> for T
 where
     U: FromIndex<T>,
 {
@@ -183,8 +237,20 @@ where
     }
 }
 
+// TODO move this back into trait Index
+/// Panics if the given index does not equal the given index.
+/// This should probably only be used for comparing shapes
+/// since the panic message uses that terminology
+pub fn shape_mismatch_fail<S1: Index, S2: IntoIndex<S1>>(a: S1, b: S2) {
+    let b: S1 = b.into_index_fail();
+    for (i, s) in a.axis_iter().zip(b.axis_iter()) {
+        if i != s {
+            panic!("Shapes do not match: expected={a:?} got={b:?}");
+        }
+    }
+}
+
 impl<const N: usize> Index for [usize; N] {
-    const NUM_DIMENSIONS: usize = N;
     type Dyn = [usize; N];
 
     fn d(&self) -> Self::Dyn {
@@ -209,7 +275,6 @@ impl<const N: usize> IndexDyn for [usize; N] {
 }
 
 impl<D1: Dim> Index for (D1,) {
-    const NUM_DIMENSIONS: usize = 1;
     type Dyn = [usize; 1];
 
     fn d(&self) -> Self::Dyn {
@@ -217,13 +282,13 @@ impl<D1: Dim> Index for (D1,) {
     }
 }
 
-impl<D1: Dim> FromIndex<(D1,)> for (D1,) {
-    fn from_index(other: (D1,)) -> Option<(D1,)> {
-        Some(other)
+impl<D1: FromDim<E1>, E1: Dim> FromIndex<(E1,)> for (D1,) {
+    fn from_index(other: (E1,)) -> Option<(D1,)> {
+        Some((other.0.into_dim()?,))
     }
 }
 
-impl<D1: Dim> FromIndex<[usize; 1]> for (D1,) {
+impl<D1: FromDim<usize>> FromIndex<[usize; 1]> for (D1,) {
     fn from_index(other: [usize; 1]) -> Option<(D1,)> {
         Some((other[0].into_dim()?,))
     }
@@ -236,7 +301,6 @@ impl<D1: Dim> FromIndex<(D1,)> for [usize; 1] {
 }
 
 impl<D1: Dim, D2: Dim> Index for (D1, D2) {
-    const NUM_DIMENSIONS: usize = 2;
     type Dyn = [usize; 2];
 
     fn d(&self) -> Self::Dyn {
@@ -244,15 +308,15 @@ impl<D1: Dim, D2: Dim> Index for (D1, D2) {
     }
 }
 
-impl<D1: Dim, D2: Dim> FromIndex<(D1, D2)> for (D1, D2) {
-    fn from_index(other: (D1, D2)) -> Option<(D1, D2)> {
-        Some(other)
+impl<D1: FromDim<E1>, D2: FromDim<E2>, E1: Dim, E2: Dim> FromIndex<(E1, E2)> for (D1, D2) {
+    fn from_index(other: (E1, E2)) -> Option<(D1, D2)> {
+        Some((other.0.into_dim()?, other.1.into_dim()?))
     }
 }
 
 impl<D1: Dim, D2: Dim> FromIndex<[usize; 2]> for (D1, D2) {
     fn from_index(other: [usize; 2]) -> Option<(D1, D2)> {
-        Some((other[0].into_dim()?, other[0].into_dim()?))
+        Some((other[0].into_dim()?, other[1].into_dim()?))
     }
 }
 
@@ -385,6 +449,9 @@ impl<I: Index> DefiniteRange for ops::RangeInclusive<I> {
 // Wrappers for array data
 // Three kinds: owned, ref, mut
 
+/// A multi-dimensional array.
+///
+/// This type owns the underlying data.
 #[derive(Debug, Clone)]
 pub struct Array<S: Index, E, D> {
     shape: S,
@@ -394,6 +461,11 @@ pub struct Array<S: Index, E, D> {
     data: D,
 }
 
+/// A view into multi-dimensional data.
+///
+/// This type holds an immutable reference the underlying data.
+/// For a mutable reference, see [ViewMut],
+/// or for owned data, see [Array].
 #[derive(Debug)]
 pub struct View<'a, S: Index, E, D> {
     shape: S,
@@ -403,6 +475,11 @@ pub struct View<'a, S: Index, E, D> {
     data: &'a D,
 }
 
+/// A mutable view into multi-dimensional data.
+///
+/// This type holds an mutable reference the underlying data.
+/// For an immutable reference, see [View],
+/// or for owned data, see [Array].
 #[derive(Debug)]
 pub struct ViewMut<'a, S: Index, E, D> {
     shape: S,
@@ -412,7 +489,22 @@ pub struct ViewMut<'a, S: Index, E, D> {
     data: &'a mut D,
 }
 
-// Get a view
+/// This trait marks anything which can represent a read-only view into multi-dimensional data,
+/// such as:
+/// * Array
+/// * View
+/// * ViewMut
+///
+/// Using this trait allows functions to accept any kind of read-only multi-dimensional data. For example:
+/// ```
+/// fn sum(a: &impl IntoView<Element=f32, Data: AsRef<[f32]>>) -> f32 {
+///     let a = a.view(); // Convert to concrete type View
+///
+///     a.into_iter().sum()
+/// }
+/// ```
+///
+/// This `sum` function can now accept `&Array`, `&View`, or `&ViewMut`.
 pub trait IntoView {
     type Shape: Index;
     type Element;
@@ -469,7 +561,23 @@ impl<S: Index, E, D> IntoView for ViewMut<'_, S, E, D> {
     }
 }
 
-// Get a mutable view
+/// This trait marks anything which can represent a mutable view into multi-dimensional data,
+/// such as:
+/// * Array
+/// * ViewMut
+///
+/// Using this trait allows functions to accept any kind of mutable multi-dimensional data. For example:
+/// ```
+/// fn increment(a: &mut impl IntoView<Element=i32, Data: AsRef<[i32]> + AsMut<[i32]>>) -> i32 {
+///     let mut a = a.view_mut(); // Convert to concrete type View
+///
+///     for e in a.into_iter() {
+///         e += 1;
+///     }
+/// }
+/// ```
+///
+/// This `increment` function can now accept `&mut Array` or `&mut View`.
 pub trait IntoViewMut: IntoView {
     fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data>;
 }
@@ -649,6 +757,28 @@ impl<'a, S: Index, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 
 /////////////////////////////////////////////
 
+/// This trait marks anything which can serve as an output target for multi-dimensional data,
+/// such as:
+/// * `&mut Array`
+/// * `&mut ViewMut`
+/// * `Alloc` (a marker struct indicating that the output should be allocated on the heap at
+///   runtime.)
+///
+/// Using this trait allows functions to store their results in either an existing array
+/// or a newly allocated array, at the discretion of the caller.
+///
+/// Here is an example:
+/// ```
+/// fn ones<S: Shape>(shape: S, out: impl IntoTarget<Element=i32, Data: AsRef<[i32]> + AsMut<[i32]>>) -> i32 {
+///     let mut a = a.view_mut(); // Convert to concrete type View
+///
+///     for e in a.into_iter() {
+///         e += 1;
+///     }
+/// }
+/// ```
+///
+/// This `increment` function can now accept `&mut Array` or `&mut View`.
 pub trait IntoTarget {
     type Shape: Index;
     type Element;
@@ -679,7 +809,7 @@ impl<'a, S: Index, E, D> IntoTarget for &'a mut Array<S, E, D> {
     type Output = ();
 
     fn build(self, shape: impl IntoIndex<Self::Shape>) -> Self::Target {
-        self.shape.shape_mismatch_fail(shape);
+        shape_mismatch_fail(self.shape, shape);
         self.view_mut()
     }
 }
@@ -693,7 +823,7 @@ impl<'a, S: Index, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
     type Output = ();
 
     fn build(self, shape: impl IntoIndex<Self::Shape>) -> Self::Target {
-        self.shape.shape_mismatch_fail(shape);
+        shape_mismatch_fail(self.shape, shape);
         self.view_mut()
     }
 }
@@ -763,9 +893,18 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc, Array, Const, DefiniteRange, Index, IntoTarget, IntoView, IntoViewMut, OutTarget,
+        alloc, Array, Const, DefiniteRange, FromIndex, Index, IntoIndex, IntoTarget, IntoView,
+        IntoViewMut, OutTarget,
     };
     use std::marker::PhantomData;
+
+    #[test]
+    fn test_shapes() {
+        <(Const<3>, Const<4>)>::from_index_fail((Const::<3>, Const::<4>));
+        <(Const<3>, Const<4>)>::from_index_fail((Const::<3>, 4));
+        <(Const<3>, Const<4>)>::from_index_fail((3, 4));
+        <(Const<3>, Const<4>)>::from_index_fail([3, 4]);
+    }
 
     #[test]
     fn test() {
@@ -798,12 +937,16 @@ mod test {
         }
 
         fn bernstein_coef<
-            S: Index,
-            O: IntoTarget<Shape = S, Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
+            S1: Index + FromIndex<S2>,
+            S2: Index + FromIndex<S1>,
+            O: IntoTarget<Shape = S2, Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
         >(
-            c_m: &impl IntoView<Shape = S, Element = f32, Data: AsRef<[f32]>>,
+            c_m: &impl IntoView<Shape = S1, Element = f32, Data: AsRef<[f32]>>,
             out: O,
-        ) -> O::Output {
+        ) -> O::Output
+        where
+            S2::Dyn: IntoIndex<S1::Dyn>, // TODO REMOVE ME
+        {
             let c_m = c_m.view();
 
             let mut target = out.build(c_m.shape);
@@ -828,7 +971,7 @@ mod test {
                             .map(|(d_n, j_n)| binomial(d_n, j_n))
                             .product();
                         let b = (num as f32) / (den as f32);
-                        b * c_m[j]
+                        b * c_m[j.into_index_fail()]
                     })
                     .sum();
             }
@@ -858,7 +1001,10 @@ mod test {
 
         //bernstein_coef(&a, &mut b.view_mut());
         //bernstein_coef(&a.view(), &mut b);
-        dbg!(bernstein_coef(&a.view(), alloc()));
+        dbg!(bernstein_coef(
+            &a.view(),
+            alloc::<(Const::<2>, Const::<2>), _>()
+        ));
         panic!();
     }
 }
