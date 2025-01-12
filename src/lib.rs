@@ -5,24 +5,36 @@ use std::ops;
 /// Represents the dimension of one axis of multi-dimensional data.
 /// These types may represent a constant known at compile-time (e.g. `Const<3>`)
 /// or runtime (e.g. `usize`),
-pub trait Dim: 'static + Sized + Clone + Copy + fmt::Debug + PartialEq + Eq + Into<usize> {}
+pub trait Dim:
+    'static
+    + Sized
+    + Clone
+    + Copy
+    + fmt::Debug
+    + PartialEq
+    + Eq
+    + Into<usize>
+    + FromDim<Self>
+    + FromDim<usize>
+{
+}
 
 /// This dimension or index can be converted from another dimension or index.
 /// This trait is implemented for all conversions that have some chance of success,
 /// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
 /// It is not implemented for conversions that have no chance of success at compile time
 /// e.g. Const<4> -> Const<3>
-pub trait FromDim<O: Dim>: Dim {
+pub trait FromDim<O: Dim>: Sized {
     fn try_from_dim(other: O) -> Option<Self>;
 }
 
 /// This dimension or index can be converted into another dimension or index.
 /// See [FromDim]
-pub trait IntoDim<T: Dim>: Dim {
+pub trait IntoDim<T>: Dim {
     fn try_into_dim(self) -> Option<T>;
 }
 
-impl<T: Dim, U: Dim> IntoDim<U> for T
+impl<T: Dim, U> IntoDim<U> for T
 where
     U: FromDim<T>,
 {
@@ -49,6 +61,12 @@ impl Dim for usize {}
 impl<const N: usize> From<Const<N>> for usize {
     fn from(_: Const<N>) -> Self {
         N
+    }
+}
+
+impl<const N: usize> FromDim<Const<N>> for usize {
+    fn try_from_dim(_: Const<N>) -> Option<Self> {
+        Some(N)
     }
 }
 
@@ -253,7 +271,7 @@ pub trait FromIndex<O: Index>: Sized {
     }
 }
 
-pub trait IntoIndex<T: Sized>: Index {
+pub trait IntoIndex<T>: Index {
     // Required methods
 
     /// Convert from this index into the given compile-time compatible index,
@@ -267,7 +285,7 @@ pub trait IntoIndex<T: Sized>: Index {
     fn into_index_fail(self) -> T;
 }
 
-impl<T: Index, U: Index> IntoIndex<U> for T
+impl<T: Index, U> IntoIndex<U> for T
 where
     U: FromIndex<T>,
 {
@@ -339,13 +357,13 @@ impl<D1: Dim> AsIndex for (D1,) {
 
 impl<D1: Dim> Shape for (D1,) {}
 
-impl<D1: FromDim<E1>, E1: Dim> FromShape<(E1,)> for (D1,) {
+impl<D1: Dim + FromDim<E1>, E1: Dim> FromShape<(E1,)> for (D1,) {
     fn try_from_shape(other: (E1,)) -> Option<(D1,)> {
         Some((other.0.try_into_dim()?,))
     }
 }
 
-impl<D1: FromDim<usize>> FromShape<[usize; 1]> for (D1,) {
+impl<D1: Dim> FromShape<[usize; 1]> for (D1,) {
     fn try_from_shape(other: [usize; 1]) -> Option<(D1,)> {
         Some((other[0].try_into_dim()?,))
     }
@@ -367,13 +385,15 @@ impl<D1: Dim, D2: Dim> AsIndex for (D1, D2) {
 
 impl<D1: Dim, D2: Dim> Shape for (D1, D2) {}
 
-impl<D1: FromDim<E1>, D2: FromDim<E2>, E1: Dim, E2: Dim> FromShape<(E1, E2)> for (D1, D2) {
+impl<D1: Dim + FromDim<E1>, D2: Dim + FromDim<E2>, E1: Dim, E2: Dim> FromShape<(E1, E2)>
+    for (D1, D2)
+{
     fn try_from_shape(other: (E1, E2)) -> Option<(D1, D2)> {
         Some((other.0.try_into_dim()?, other.1.try_into_dim()?))
     }
 }
 
-impl<D1: FromDim<usize>, D2: FromDim<usize>> FromShape<[usize; 2]> for (D1, D2) {
+impl<D1: Dim, D2: Dim> FromShape<[usize; 2]> for (D1, D2) {
     fn try_from_shape(other: [usize; 2]) -> Option<(D1, D2)> {
         Some((other[0].try_into_dim()?, other[1].try_into_dim()?))
     }
@@ -578,57 +598,53 @@ pub struct ViewMut<'a, S: Shape, E, D> {
 /// ```
 ///
 /// This `sum` function can now accept `&Array`, `&View`, or `&ViewMut`.
-pub trait IntoView {
-    type Shape: Shape;
+pub trait IntoView<S: Shape> {
     type Element;
     type Data;
 
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data>;
+    fn view(&self) -> View<S, Self::Element, Self::Data>;
 }
 
-impl<S: Shape, E, D> IntoView for Array<S, E, D> {
-    type Shape = S;
+impl<S: FromShape<S2>, S2: Shape, E, D> IntoView<S> for Array<S2, E, D> {
     type Element = E;
     type Data = D;
 
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+    fn view(&self) -> View<S, Self::Element, Self::Data> {
         View {
-            shape: self.shape.clone(),
+            shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides,
+            strides: self.strides.into_index_fail(),
             data: &self.data,
         }
     }
 }
 
-impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
-    type Shape = S;
+impl<S: FromShape<S2>, S2: Shape, E, D> IntoView<S> for View<'_, S2, E, D> {
     type Element = E;
     type Data = D;
 
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+    fn view(&self) -> View<S, Self::Element, Self::Data> {
         View {
-            shape: self.shape.clone(),
+            shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides,
+            strides: self.strides.into_index_fail(),
             data: self.data,
         }
     }
 }
 
-impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
-    type Shape = S;
+impl<S: FromShape<S2>, S2: Shape, E, D> IntoView<S> for ViewMut<'_, S2, E, D> {
     type Element = E;
     type Data = D;
 
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+    fn view(&self) -> View<S, Self::Element, Self::Data> {
         View {
-            shape: self.shape.clone(),
+            shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides,
+            strides: self.strides.into_index_fail(),
             data: self.data,
         }
     }
@@ -651,29 +667,29 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
 /// ```
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut View`.
-pub trait IntoViewMut: IntoView {
-    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data>;
+pub trait IntoViewMut<S: Shape>: IntoView<S> {
+    fn view_mut(&mut self) -> ViewMut<'_, S, Self::Element, Self::Data>;
 }
 
-impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
-    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
+impl<S: FromShape<S2>, S2: Shape, E, D> IntoViewMut<S> for Array<S2, E, D> {
+    fn view_mut(&mut self) -> ViewMut<'_, S, Self::Element, Self::Data> {
         ViewMut {
-            shape: self.shape.clone(),
+            shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides,
+            strides: self.strides.into_index_fail(),
             data: &mut self.data,
         }
     }
 }
 
-impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
-    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
+impl<S: FromShape<S2>, S2: Shape, E, D> IntoViewMut<S> for ViewMut<'_, S2, E, D> {
+    fn view_mut(&mut self) -> ViewMut<'_, S, Self::Element, Self::Data> {
         ViewMut {
-            shape: self.shape.clone(),
+            shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides,
+            strides: self.strides.into_index_fail(),
             data: self.data,
         }
     }
@@ -852,56 +868,52 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 /// ```
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut View`.
-pub trait IntoTarget {
-    type Shape: Shape;
+pub trait IntoTarget<S: Shape> {
     type Element;
     type Data;
 
     type Output;
-    type Target: OutTarget<
-        Shape = Self::Shape,
-        Element = Self::Element,
-        Data = Self::Data,
-        Output = Self::Output,
-    >;
+    type Target: OutTarget<S, Element = Self::Element, Data = Self::Data, Output = Self::Output>;
 
-    fn build(self, shape: impl IntoShape<Self::Shape>) -> Self::Target;
+    fn build(self, shape: S) -> Self::Target;
 }
 
-pub trait OutTarget: IntoView + IntoViewMut {
+pub trait OutTarget<S: Shape>: IntoViewMut<S> {
     type Output;
     fn output(self) -> Self::Output;
 }
 
-impl<'a, S: Shape, E, D> IntoTarget for &'a mut Array<S, E, D> {
-    type Shape = S;
+// TODO can we get rid of the explicit reflexivity?
+impl<'a, S: FromShape<S> + FromShape<S2>, S2: Shape, E, D> IntoTarget<S>
+    for &'a mut Array<S2, E, D>
+{
     type Element = E;
     type Data = D;
 
     type Target = ViewMut<'a, S, E, D>;
     type Output = ();
 
-    fn build(self, shape: impl IntoShape<Self::Shape>) -> Self::Target {
-        shape_mismatch_fail(self.shape, shape);
+    fn build(self, _shape: S) -> Self::Target {
         self.view_mut()
     }
 }
 
-impl<'a, S: Shape, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
-    type Shape = S;
+// TODO can we get rid of the explicit reflexivity?
+impl<'a, S: FromShape<S> + FromShape<S2>, S2: Shape, E, D> IntoTarget<S>
+    for &'a mut ViewMut<'a, S2, E, D>
+{
     type Element = E;
     type Data = D;
 
     type Target = ViewMut<'a, S, E, D>;
     type Output = ();
 
-    fn build(self, shape: impl IntoShape<Self::Shape>) -> Self::Target {
-        shape_mismatch_fail(self.shape, shape);
+    fn build(self, _shape: S) -> Self::Target {
         self.view_mut()
     }
 }
 
-impl<'a, S: Shape, E, D> OutTarget for ViewMut<'a, S, E, D> {
+impl<'a, S: FromShape<S2>, S2: Shape, E, D> OutTarget<S> for ViewMut<'a, S2, E, D> {
     type Output = ();
 
     fn output(self) -> Self::Output {
@@ -909,22 +921,22 @@ impl<'a, S: Shape, E, D> OutTarget for ViewMut<'a, S, E, D> {
     }
 }
 
-pub struct Alloc<S: Shape, E>(marker::PhantomData<(S, E)>);
+pub struct Alloc<E>(marker::PhantomData<E>);
 
-pub fn alloc<S: Shape, E>() -> Alloc<S, E> {
+pub fn alloc<E>() -> Alloc<E> {
     Alloc(marker::PhantomData)
 }
 
-impl<'a, S: Shape, E: Default + Clone> IntoTarget for Alloc<S, E> {
-    type Shape = S;
+// TODO get rid of symmetric bound?
+impl<'a, S: FromShape<S>, E: Default + Clone> IntoTarget<S> for Alloc<E> {
     type Element = E;
     type Data = Vec<E>;
 
-    type Target = Array<Self::Shape, Self::Element, Self::Data>;
+    type Target = Array<S, Self::Element, Self::Data>;
     type Output = Self::Target;
 
-    fn build(self, shape: impl IntoShape<Self::Shape>) -> Self::Target {
-        let shape: Self::Shape = shape.into_shape_fail();
+    fn build(self, shape: S) -> Self::Target {
+        let shape = shape.into_shape_fail();
         Array {
             shape,
             strides: shape.default_strides(),
@@ -935,7 +947,7 @@ impl<'a, S: Shape, E: Default + Clone> IntoTarget for Alloc<S, E> {
     }
 }
 
-impl<S: Shape, E, D> OutTarget for Array<S, E, D> {
+impl<S: FromShape<S2>, S2: Shape, E, D> OutTarget<S> for Array<S2, E, D> {
     type Output = Self;
 
     fn output(self) -> Self::Output {
@@ -1010,11 +1022,10 @@ mod test {
         }
 
         fn bernstein_coef<
-            S1: FromShape<S2>,
-            S2: FromShape<S1>,
-            O: IntoTarget<Shape = S2, Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
+            S: Shape,
+            O: IntoTarget<S, Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
         >(
-            c_m: &impl IntoView<Shape = S1, Element = f32, Data: AsRef<[f32]>>,
+            c_m: &impl IntoView<S, Element = f32, Data: AsRef<[f32]>>,
             out: O,
         ) -> O::Output {
             let c_m = c_m.view();
@@ -1060,22 +1071,20 @@ mod test {
             data: vec![1., 2., 3., 4.],
         };
 
-        /*
         let mut b = Array {
-            shape: (Const::<2>, Const::<2>),
-            strides: (Const::<2>, Const::<2>).default_strides(),
+            shape: [2, 2],
+            strides: [2, 2].default_strides(),
             element: PhantomData,
             offset: 0,
             data: vec![0.; 4],
         };
-        */
 
         //bernstein_coef(&a, &mut b.view_mut());
         //bernstein_coef(&a.view(), &mut b);
-        dbg!(bernstein_coef(
-            &a.view(),
-            alloc::<(Const::<2>, Const::<2>), _>()
-        ));
-        panic!();
+
+        // TODO get rid of this explicit generic?
+        bernstein_coef::<(Const<2>, Const<2>), _>(&a, alloc());
+
+        bernstein_coef::<(Const<2>, usize), _>(&a, &mut b);
     }
 }
