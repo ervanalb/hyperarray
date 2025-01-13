@@ -111,7 +111,7 @@ pub trait AsIndex {
 ///
 /// Note that "index" and "shape" are conceptually the same type,
 /// and this trait represents either.
-pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
+pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + FromShape<Self> {
     // Provided methods
 
     /// How many total elements are contained within a multi-dimensional data
@@ -193,7 +193,7 @@ pub trait Index:
 /// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
 /// It is not implemented for conversions that have no chance of success at compile time
 /// e.g. Const<4> -> Const<3>
-pub trait FromShape<O: Shape>: Shape<Index: FromIndex<O::Index>> {
+pub trait FromShape<O: Shape>: Sized {
     // Required methods
 
     /// Convert to this index from the given compile-time compatible index,
@@ -228,7 +228,7 @@ pub trait IntoShape<T: Shape>: Shape<Index: IntoIndex<T::Index>> {
     fn into_shape_fail(self) -> T;
 }
 
-impl<T: Shape, U: Shape> IntoShape<U> for T
+impl<T: Shape<Index: IntoIndex<U::Index>>, U: Shape> IntoShape<U> for T
 where
     U: FromShape<T>,
 {
@@ -608,10 +608,14 @@ pub trait IntoView {
 
     /// Attempt to view with the given shape type, returning None if the given shape type is not
     /// compatible
-    fn try_view<S: FromShape<Self::Shape>>(&self) -> Option<View<S, Self::Element, Self::Data>>;
+    fn try_view<S: Shape>(&self) -> Option<View<S, Self::Element, Self::Data>>
+    where
+        Self::Shape: IntoShape<S>;
 
     /// Attempt to view with the given shape type, panicking if the given shape type is not compatible
-    fn view_or_fail<S: FromShape<Self::Shape>>(&self) -> View<S, Self::Element, Self::Data>;
+    fn view_or_fail<S: Shape>(&self) -> View<S, Self::Element, Self::Data>
+    where
+        Self::Shape: IntoShape<S>;
 }
 
 impl<S: Shape, E, D> IntoView for Array<S, E, D> {
@@ -629,7 +633,10 @@ impl<S: Shape, E, D> IntoView for Array<S, E, D> {
         }
     }
 
-    fn try_view<S2: FromShape<Self::Shape>>(&self) -> Option<View<S2, Self::Element, Self::Data>> {
+    fn try_view<S2: Shape>(&self) -> Option<View<S2, Self::Element, Self::Data>>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         Some(View {
             shape: self.shape.try_into_shape()?,
             element: marker::PhantomData,
@@ -639,7 +646,10 @@ impl<S: Shape, E, D> IntoView for Array<S, E, D> {
         })
     }
 
-    fn view_or_fail<S2: FromShape<Self::Shape>>(&self) -> View<S2, Self::Element, Self::Data> {
+    fn view_or_fail<S2: Shape>(&self) -> View<S2, Self::Element, Self::Data>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         View {
             shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
@@ -665,7 +675,10 @@ impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
         }
     }
 
-    fn try_view<S2: FromShape<Self::Shape>>(&self) -> Option<View<S2, Self::Element, Self::Data>> {
+    fn try_view<S2: Shape>(&self) -> Option<View<S2, Self::Element, Self::Data>>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         Some(View {
             shape: self.shape.try_into_shape()?,
             element: marker::PhantomData,
@@ -675,7 +688,10 @@ impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
         })
     }
 
-    fn view_or_fail<S2: FromShape<Self::Shape>>(&self) -> View<S2, Self::Element, Self::Data> {
+    fn view_or_fail<S2: Shape>(&self) -> View<S2, Self::Element, Self::Data>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         View {
             shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
@@ -701,7 +717,10 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
         }
     }
 
-    fn try_view<S2: FromShape<Self::Shape>>(&self) -> Option<View<S2, Self::Element, Self::Data>> {
+    fn try_view<S2: Shape>(&self) -> Option<View<S2, Self::Element, Self::Data>>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         Some(View {
             shape: self.shape.try_into_shape()?,
             element: marker::PhantomData,
@@ -711,7 +730,10 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
         })
     }
 
-    fn view_or_fail<S2: FromShape<Self::Shape>>(&self) -> View<S2, Self::Element, Self::Data> {
+    fn view_or_fail<S2: Shape>(&self) -> View<S2, Self::Element, Self::Data>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         View {
             shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
@@ -742,13 +764,13 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
 pub trait IntoViewMut: IntoView {
     fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data>;
 
-    fn try_view_mut<S2: FromShape<Self::Shape>>(
-        &mut self,
-    ) -> Option<ViewMut<'_, S2, Self::Element, Self::Data>>;
+    fn try_view_mut<S: Shape>(&mut self) -> Option<ViewMut<'_, S, Self::Element, Self::Data>>
+    where
+        Self::Shape: IntoShape<S>;
 
-    fn view_mut_or_fail<S2: FromShape<Self::Shape>>(
-        &mut self,
-    ) -> ViewMut<'_, S2, Self::Element, Self::Data>;
+    fn view_mut_or_fail<S: Shape>(&mut self) -> ViewMut<'_, S, Self::Element, Self::Data>
+    where
+        Self::Shape: IntoShape<S>;
 }
 
 impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
@@ -761,9 +783,10 @@ impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
             data: &mut self.data,
         }
     }
-    fn try_view_mut<S2: FromShape<Self::Shape>>(
-        &mut self,
-    ) -> Option<ViewMut<'_, S2, Self::Element, Self::Data>> {
+    fn try_view_mut<S2: Shape>(&mut self) -> Option<ViewMut<'_, S2, Self::Element, Self::Data>>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         Some(ViewMut {
             shape: self.shape.try_into_shape()?,
             element: marker::PhantomData,
@@ -772,9 +795,10 @@ impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
             data: &mut self.data,
         })
     }
-    fn view_mut_or_fail<S2: FromShape<Self::Shape>>(
-        &mut self,
-    ) -> ViewMut<'_, S2, Self::Element, Self::Data> {
+    fn view_mut_or_fail<S2: Shape>(&mut self) -> ViewMut<'_, S2, Self::Element, Self::Data>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         ViewMut {
             shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
@@ -795,9 +819,10 @@ impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
             data: self.data,
         }
     }
-    fn try_view_mut<S2: FromShape<Self::Shape>>(
-        &mut self,
-    ) -> Option<ViewMut<'_, S2, Self::Element, Self::Data>> {
+    fn try_view_mut<S2: Shape>(&mut self) -> Option<ViewMut<'_, S2, Self::Element, Self::Data>>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         Some(ViewMut {
             shape: self.shape.try_into_shape()?,
             element: marker::PhantomData,
@@ -806,9 +831,10 @@ impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
             data: self.data,
         })
     }
-    fn view_mut_or_fail<S2: FromShape<Self::Shape>>(
-        &mut self,
-    ) -> ViewMut<'_, S2, Self::Element, Self::Data> {
+    fn view_mut_or_fail<S2: Shape>(&mut self) -> ViewMut<'_, S2, Self::Element, Self::Data>
+    where
+        Self::Shape: IntoShape<S2>,
+    {
         ViewMut {
             shape: self.shape.into_shape_fail(),
             element: marker::PhantomData,
@@ -993,8 +1019,7 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut View`.
 pub trait IntoTarget {
-    // TODO can we get rid of the explicit reflexivity?
-    type Shape: FromShape<Self::Shape>;
+    type Shape: Shape;
     type Element;
     type Data;
 
@@ -1014,8 +1039,7 @@ pub trait OutTarget: IntoViewMut {
     fn output(self) -> Self::Output;
 }
 
-// TODO can we get rid of the explicit reflexivity?
-impl<'a, S: FromShape<S>, E, D> IntoTarget for &'a mut Array<S, E, D> {
+impl<'a, S: Shape, E, D> IntoTarget for &'a mut Array<S, E, D> {
     type Shape = S;
     type Element = E;
     type Data = D;
@@ -1028,8 +1052,7 @@ impl<'a, S: FromShape<S>, E, D> IntoTarget for &'a mut Array<S, E, D> {
     }
 }
 
-// TODO can we get rid of the explicit reflexivity?
-impl<'a, S: FromShape<S>, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
+impl<'a, S: Shape, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
     type Shape = S;
     type Element = E;
     type Data = D;
@@ -1042,8 +1065,7 @@ impl<'a, S: FromShape<S>, E, D> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
     }
 }
 
-// TODO can we get rid of the explicit reflexivity?
-impl<'a, S: FromShape<S>, E, D> OutTarget for ViewMut<'a, S, E, D> {
+impl<'a, S: Shape, E, D> OutTarget for ViewMut<'a, S, E, D> {
     type Output = ();
 
     fn output(self) -> Self::Output {
@@ -1057,8 +1079,7 @@ pub fn alloc<S, E>() -> Alloc<S, E> {
     Alloc(marker::PhantomData)
 }
 
-// TODO can we get rid of the explicit reflexivity?
-impl<'a, S: FromShape<S>, E: Default + Clone> IntoTarget for Alloc<S, E> {
+impl<'a, S: Shape, E: Default + Clone> IntoTarget for Alloc<S, E> {
     type Shape = S;
     type Element = E;
     type Data = Vec<E>;
@@ -1078,8 +1099,7 @@ impl<'a, S: FromShape<S>, E: Default + Clone> IntoTarget for Alloc<S, E> {
     }
 }
 
-// TODO can we get rid of the explicit reflexivity?
-impl<S: FromShape<S>, E, D> OutTarget for Array<S, E, D> {
+impl<S: Shape, E, D> OutTarget for Array<S, E, D> {
     type Output = Self;
 
     fn output(self) -> Self::Output {
@@ -1110,17 +1130,18 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc, Array, Const, DefiniteRange, FromShape, IntoShape, IntoTarget, IntoView,
-        IntoViewMut, OutTarget, Shape,
+        alloc, Array, Const, DefiniteRange, IntoShape, IntoTarget, IntoView, IntoViewMut,
+        OutTarget, Shape,
     };
     use std::marker::PhantomData;
 
     #[test]
     fn test_shapes() {
-        <(Const<3>, Const<4>)>::from_shape_fail((Const::<3>, Const::<4>));
-        <(Const<3>, Const<4>)>::from_shape_fail((Const::<3>, 4));
-        <(Const<3>, Const<4>)>::from_shape_fail((3, 4));
-        <(Const<3>, Const<4>)>::from_shape_fail([3, 4]);
+        let mut _s = (Const::<3>, Const::<4>);
+        _s = (Const::<3>, Const::<4>).into_shape_fail();
+        _s = (Const::<3>, 4).into_shape_fail();
+        _s = (3, 4).into_shape_fail();
+        _s = [3, 4].into_shape_fail();
     }
 
     #[test]
@@ -1154,9 +1175,8 @@ mod test {
         }
 
         fn bernstein_coef<
-            // TODO remove this reflexivity
-            S: Shape + FromShape<S> + FromShape<O::Shape> + IntoShape<O::Shape>,
-            O: IntoTarget<Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
+            S: Shape + IntoShape<O::Shape>,
+            O: IntoTarget<Shape: IntoShape<S>, Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
         >(
             c_m: &impl IntoView<Shape = S, Element = f32, Data: AsRef<[f32]>>,
             out: O,
@@ -1215,7 +1235,6 @@ mod test {
         //bernstein_coef(&a, &mut b.view_mut());
         //bernstein_coef(&a.view(), &mut b);
 
-        // TODO get rid of this explicit generic?
         bernstein_coef(&a, alloc::<[usize; 2], _>());
 
         bernstein_coef(&a, &mut b);
