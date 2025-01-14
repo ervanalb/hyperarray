@@ -1,51 +1,19 @@
+use std::cmp;
 use std::fmt;
 use std::marker;
 use std::ops;
 
+// TODO: FromDim and FromShape don't make sense!
+// They should be replaced with
+
 /// Represents the dimension of one axis of multi-dimensional data.
 /// These types may represent a constant known at compile-time (e.g. `Const<3>`)
 /// or runtime (e.g. `usize`),
-pub trait Dim:
-    'static
-    + Sized
-    + Clone
-    + Copy
-    + fmt::Debug
-    + PartialEq
-    + Eq
-    + Into<usize>
-    + FromDim<Self>
-    + FromDim<usize>
-{
-}
-
-/// This dimension or index can be converted from another dimension or index.
-/// This trait is implemented for all conversions that have some chance of success,
-/// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
-/// It is not implemented for conversions that have no chance of success at compile time
-/// e.g. Const<4> -> Const<3>
-pub trait FromDim<O: Dim>: Sized {
-    fn try_from_dim(other: O) -> Option<Self>;
-}
-
-/// This dimension or index can be converted into another dimension or index.
-/// See [FromDim]
-pub trait IntoDim<T>: Dim {
-    fn try_into_dim(self) -> Option<T>;
-}
-
-impl<T: Dim, U> IntoDim<U> for T
-where
-    U: FromDim<T>,
-{
-    fn try_into_dim(self) -> Option<U> {
-        U::try_from_dim(self)
-    }
-}
+pub trait Dim: 'static + Sized + Clone + Copy + fmt::Debug + Into<usize> + PartialEq {}
 
 /// Represents a dimension known at compile time.
 /// The primitive type `usize` is used for a dimension not known at compile time.
-#[derive(Default, Clone, Copy, PartialEq, Eq)]
+#[derive(Default, Clone, Copy)]
 pub struct Const<const N: usize>;
 
 impl<const N: usize> fmt::Debug for Const<N> {
@@ -56,39 +24,29 @@ impl<const N: usize> fmt::Debug for Const<N> {
 
 impl<const N: usize> Dim for Const<N> {}
 
-impl Dim for usize {}
-
 impl<const N: usize> From<Const<N>> for usize {
-    fn from(_: Const<N>) -> Self {
+    fn from(_other: Const<N>) -> usize {
         N
     }
 }
 
-impl<const N: usize> FromDim<Const<N>> for usize {
-    fn try_from_dim(_: Const<N>) -> Option<Self> {
-        Some(N)
+impl Dim for usize {}
+
+impl<const N: usize> cmp::PartialEq<Const<N>> for usize {
+    fn eq(&self, _other: &Const<N>) -> bool {
+        *self == N
     }
 }
 
-impl<const N: usize> FromDim<usize> for Const<N> {
-    fn try_from_dim(other: usize) -> Option<Self> {
-        if other == N {
-            Some(Const::<N>)
-        } else {
-            None
-        }
+impl<const N: usize> cmp::PartialEq<usize> for Const<N> {
+    fn eq(&self, other: &usize) -> bool {
+        N == *other
     }
 }
 
-impl FromDim<usize> for usize {
-    fn try_from_dim(other: usize) -> Option<usize> {
-        Some(other)
-    }
-}
-
-impl<const N: usize> FromDim<Const<N>> for Const<N> {
-    fn try_from_dim(other: Const<N>) -> Option<Const<N>> {
-        Some(other)
+impl<const N: usize> cmp::PartialEq<Const<N>> for Const<N> {
+    fn eq(&self, _other: &Const<N>) -> bool {
+        true
     }
 }
 
@@ -111,7 +69,7 @@ pub trait AsIndex {
 ///
 /// Note that "index" and "shape" are conceptually the same type,
 /// and this trait represents either.
-pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + FromShape<Self> {
+pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + ShapeEqBase<Self> {
     // Provided methods
 
     /// How many total elements are contained within a multi-dimensional data
@@ -151,6 +109,18 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + FromSha
             if i >= s {
                 panic!("Index out of bounds: index={idx:?} shape={self:?}");
             }
+        }
+    }
+
+    /// Panics if the given index does not equal the given index.
+    /// This should probably only be used for comparing shapes
+    /// since the panic message uses that terminology
+    fn shape_mismatch_fail<S: Shape>(&self, other: &S)
+    where
+        Self: ShapeEq<S>,
+    {
+        if !self.shape_eq(other) {
+            panic!("Shapes do not match: expected={self:?} got={other:?}");
         }
     }
 }
@@ -193,56 +163,16 @@ pub trait Index:
 /// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
 /// It is not implemented for conversions that have no chance of success at compile time
 /// e.g. Const<4> -> Const<3>
-pub trait FromShape<O: Shape>: Sized {
+pub trait ShapeEqBase<O>: Sized {
     // Required methods
 
-    /// Convert to this index from the given compile-time compatible index,
-    /// returning None if they turn out not to be compatible at runtime.
-    fn try_from_shape(other: O) -> Option<Self>;
-
-    // Provided methods
-
-    /// Convert to this index from the given compile-time compatible index,
-    /// panicking if they turn out not to be compatible at runtime.
-    fn from_shape_fail(other: O) -> Self {
-        Self::try_from_shape(other).unwrap_or_else(|| {
-            panic!(
-                "Shapes are not compatible: type={} got={other:?}",
-                std::any::type_name::<Self>()
-            )
-        })
-    }
+    fn shape_eq(&self, other: &O) -> bool;
 }
 
-pub trait IntoShape<T: Shape>: Shape<Index: IntoIndex<T::Index>> {
-    // Required methods
-
-    /// Convert from this index into the given compile-time compatible index,
-    /// returning None if they turn out not to be compatible at runtime.
-    fn try_into_shape(self) -> Option<T>;
-
-    // Provided methods
-
-    /// Convert from this index into the given compile-time compatible index,
-    /// panicking if they turn out not to be compatible at runtime.
-    fn into_shape_fail(self) -> T;
-}
-
-impl<T: Shape<Index: IntoIndex<U::Index>>, U: Shape> IntoShape<U> for T
-where
-    U: FromShape<T>,
+pub trait ShapeEq<T: Shape>: Shape<Index: IntoIndex<T::Index>> + ShapeEqBase<T> {}
+impl<T: Shape<Index: IntoIndex<U::Index>> + ShapeEqBase<U>, U: Shape> ShapeEq<U> for T where
+    U: ShapeEqBase<T>
 {
-    // Required methods
-
-    fn try_into_shape(self) -> Option<U> {
-        U::try_from_shape(self)
-    }
-
-    // Provided methods
-
-    fn into_shape_fail(self) -> U {
-        U::from_shape_fail(self)
-    }
 }
 
 /// This index can be converted from another index.
@@ -302,19 +232,6 @@ where
     }
 }
 
-// TODO move this back into trait Index
-/// Panics if the given index does not equal the given index.
-/// This should probably only be used for comparing shapes
-/// since the panic message uses that terminology
-pub fn shape_mismatch_fail<S1: Shape, S2: IntoShape<S1>>(a: S1, b: S2) {
-    let b: S1 = b.into_shape_fail();
-    for (i, s) in a.as_index().into_iter().zip(b.as_index().into_iter()) {
-        if i != s {
-            panic!("Shapes do not match: expected={a:?} got={b:?}");
-        }
-    }
-}
-
 impl<const N: usize> AsIndex for [usize; N] {
     type Index = [usize; N];
 
@@ -325,9 +242,9 @@ impl<const N: usize> AsIndex for [usize; N] {
 
 impl<const N: usize> Shape for [usize; N] {}
 
-impl<const N: usize> FromShape<[usize; N]> for [usize; N] {
-    fn try_from_shape(other: [usize; N]) -> Option<[usize; N]> {
-        Some(other)
+impl<const N: usize> ShapeEqBase<[usize; N]> for [usize; N] {
+    fn shape_eq(&self, other: &[usize; N]) -> bool {
+        self == other
     }
 }
 
@@ -357,21 +274,24 @@ impl<D1: Dim> AsIndex for (D1,) {
 
 impl<D1: Dim> Shape for (D1,) {}
 
-impl<D1: Dim + FromDim<E1>, E1: Dim> FromShape<(E1,)> for (D1,) {
-    fn try_from_shape(other: (E1,)) -> Option<(D1,)> {
-        Some((other.0.try_into_dim()?,))
+impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEqBase<(E1,)> for (D1,) {
+    fn shape_eq(&self, other: &(E1,)) -> bool {
+        self.0 == other.0
     }
 }
 
-impl<D1: Dim> FromShape<[usize; 1]> for (D1,) {
-    fn try_from_shape(other: [usize; 1]) -> Option<(D1,)> {
-        Some((other[0].try_into_dim()?,))
+impl<D1: Dim + cmp::PartialEq<usize>> ShapeEqBase<[usize; 1]> for (D1,) {
+    fn shape_eq(&self, other: &[usize; 1]) -> bool {
+        self.0 == other[0]
     }
 }
 
-impl<D1: Dim> FromShape<(D1,)> for [usize; 1] {
-    fn try_from_shape(other: (D1,)) -> Option<[usize; 1]> {
-        Some(other.as_index())
+impl<D1: Dim> ShapeEqBase<(D1,)> for [usize; 1]
+where
+    usize: PartialEq<D1>,
+{
+    fn shape_eq(&self, other: &(D1,)) -> bool {
+        self[0] == other.0
     }
 }
 
@@ -385,23 +305,27 @@ impl<D1: Dim, D2: Dim> AsIndex for (D1, D2) {
 
 impl<D1: Dim, D2: Dim> Shape for (D1, D2) {}
 
-impl<D1: Dim + FromDim<E1>, D2: Dim + FromDim<E2>, E1: Dim, E2: Dim> FromShape<(E1, E2)>
+impl<D1: Dim + PartialEq<E1>, D2: Dim + PartialEq<E2>, E1: Dim, E2: Dim> ShapeEqBase<(E1, E2)>
     for (D1, D2)
 {
-    fn try_from_shape(other: (E1, E2)) -> Option<(D1, D2)> {
-        Some((other.0.try_into_dim()?, other.1.try_into_dim()?))
+    fn shape_eq(&self, other: &(E1, E2)) -> bool {
+        self.0 == other.0 && self.1 == other.1
     }
 }
 
-impl<D1: Dim, D2: Dim> FromShape<[usize; 2]> for (D1, D2) {
-    fn try_from_shape(other: [usize; 2]) -> Option<(D1, D2)> {
-        Some((other[0].try_into_dim()?, other[1].try_into_dim()?))
+impl<D1: Dim + PartialEq<usize>, D2: Dim + PartialEq<usize>> ShapeEqBase<[usize; 2]> for (D1, D2) {
+    fn shape_eq(&self, other: &[usize; 2]) -> bool {
+        self.0 == other[0] && self.1 == other[1]
     }
 }
 
-impl<D1: Dim, D2: Dim> FromShape<(D1, D2)> for [usize; 2] {
-    fn try_from_shape(other: (D1, D2)) -> Option<[usize; 2]> {
-        Some(other.as_index())
+impl<D1: Dim, D2: Dim> ShapeEqBase<(D1, D2)> for [usize; 2]
+where
+    usize: PartialEq<D1>,
+    usize: PartialEq<D2>,
+{
+    fn shape_eq(&self, other: &(D1, D2)) -> bool {
+        self[0] == other.0 && self[1] == other.1
     }
 }
 
@@ -606,16 +530,10 @@ pub trait IntoView {
     /// Infalliable view using the native Shape
     fn view(&self) -> View<Self::Shape, Self::Element, Self::Data>;
 
-    /// Attempt to view with the given shape type, returning None if the given shape type is not
-    /// compatible
-    fn try_view<S: Shape>(&self) -> Option<View<S, Self::Element, Self::Data>>
-    where
-        Self::Shape: IntoShape<S>;
-
     /// Attempt to view with the given shape type, panicking if the given shape type is not compatible
-    fn view_or_fail<S: Shape>(&self) -> View<S, Self::Element, Self::Data>
+    fn view_or_fail<S: Shape>(&self, shape: S) -> View<S, Self::Element, Self::Data>
     where
-        Self::Shape: IntoShape<S>;
+        Self::Shape: ShapeEq<S>;
 }
 
 impl<S: Shape, E, D> IntoView for Array<S, E, D> {
@@ -633,25 +551,13 @@ impl<S: Shape, E, D> IntoView for Array<S, E, D> {
         }
     }
 
-    fn try_view<S2: Shape>(&self) -> Option<View<S2, Self::Element, Self::Data>>
+    fn view_or_fail<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
     where
-        Self::Shape: IntoShape<S2>,
+        Self::Shape: ShapeEq<S2>,
     {
-        Some(View {
-            shape: self.shape.try_into_shape()?,
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
-            data: &self.data,
-        })
-    }
-
-    fn view_or_fail<S2: Shape>(&self) -> View<S2, Self::Element, Self::Data>
-    where
-        Self::Shape: IntoShape<S2>,
-    {
+        self.shape.shape_mismatch_fail(&shape);
         View {
-            shape: self.shape.into_shape_fail(),
+            shape,
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
@@ -675,25 +581,13 @@ impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
         }
     }
 
-    fn try_view<S2: Shape>(&self) -> Option<View<S2, Self::Element, Self::Data>>
+    fn view_or_fail<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
     where
-        Self::Shape: IntoShape<S2>,
+        Self::Shape: ShapeEq<S2>,
     {
-        Some(View {
-            shape: self.shape.try_into_shape()?,
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
-            data: self.data,
-        })
-    }
-
-    fn view_or_fail<S2: Shape>(&self) -> View<S2, Self::Element, Self::Data>
-    where
-        Self::Shape: IntoShape<S2>,
-    {
+        self.shape.shape_mismatch_fail(&shape);
         View {
-            shape: self.shape.into_shape_fail(),
+            shape,
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
@@ -717,25 +611,13 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
         }
     }
 
-    fn try_view<S2: Shape>(&self) -> Option<View<S2, Self::Element, Self::Data>>
+    fn view_or_fail<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
     where
-        Self::Shape: IntoShape<S2>,
+        Self::Shape: ShapeEq<S2>,
     {
-        Some(View {
-            shape: self.shape.try_into_shape()?,
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
-            data: self.data,
-        })
-    }
-
-    fn view_or_fail<S2: Shape>(&self) -> View<S2, Self::Element, Self::Data>
-    where
-        Self::Shape: IntoShape<S2>,
-    {
+        self.shape.shape_mismatch_fail(&shape);
         View {
-            shape: self.shape.into_shape_fail(),
+            shape,
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
@@ -764,13 +646,9 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
 pub trait IntoViewMut: IntoView {
     fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data>;
 
-    fn try_view_mut<S: Shape>(&mut self) -> Option<ViewMut<'_, S, Self::Element, Self::Data>>
+    fn view_mut_or_fail<S: Shape>(&mut self, shape: S) -> ViewMut<'_, S, Self::Element, Self::Data>
     where
-        Self::Shape: IntoShape<S>;
-
-    fn view_mut_or_fail<S: Shape>(&mut self) -> ViewMut<'_, S, Self::Element, Self::Data>
-    where
-        Self::Shape: IntoShape<S>;
+        Self::Shape: ShapeEq<S>;
 }
 
 impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
@@ -783,24 +661,17 @@ impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
             data: &mut self.data,
         }
     }
-    fn try_view_mut<S2: Shape>(&mut self) -> Option<ViewMut<'_, S2, Self::Element, Self::Data>>
+
+    fn view_mut_or_fail<S2: Shape>(
+        &mut self,
+        shape: S2,
+    ) -> ViewMut<'_, S2, Self::Element, Self::Data>
     where
-        Self::Shape: IntoShape<S2>,
+        Self::Shape: ShapeEq<S2>,
     {
-        Some(ViewMut {
-            shape: self.shape.try_into_shape()?,
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
-            data: &mut self.data,
-        })
-    }
-    fn view_mut_or_fail<S2: Shape>(&mut self) -> ViewMut<'_, S2, Self::Element, Self::Data>
-    where
-        Self::Shape: IntoShape<S2>,
-    {
+        self.shape.shape_mismatch_fail(&shape);
         ViewMut {
-            shape: self.shape.into_shape_fail(),
+            shape,
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
@@ -819,24 +690,17 @@ impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
             data: self.data,
         }
     }
-    fn try_view_mut<S2: Shape>(&mut self) -> Option<ViewMut<'_, S2, Self::Element, Self::Data>>
+
+    fn view_mut_or_fail<S2: Shape>(
+        &mut self,
+        shape: S2,
+    ) -> ViewMut<'_, S2, Self::Element, Self::Data>
     where
-        Self::Shape: IntoShape<S2>,
+        Self::Shape: ShapeEq<S2>,
     {
-        Some(ViewMut {
-            shape: self.shape.try_into_shape()?,
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
-            data: self.data,
-        })
-    }
-    fn view_mut_or_fail<S2: Shape>(&mut self) -> ViewMut<'_, S2, Self::Element, Self::Data>
-    where
-        Self::Shape: IntoShape<S2>,
-    {
+        self.shape.shape_mismatch_fail(&shape);
         ViewMut {
-            shape: self.shape.into_shape_fail(),
+            shape,
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
@@ -1019,14 +883,13 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut View`.
 
-pub trait IntoTargetShape {
+pub trait IntoTargetShape<E> {
     type Shape: Shape;
-    type Element;
     type Data;
     type Output;
     type Target: OutTarget<
         Shape = Self::Shape,
-        Element = Self::Element,
+        Element = E,
         Data = Self::Data,
         Output = Self::Output,
     >;
@@ -1039,7 +902,7 @@ pub trait IntoTarget<S: Shape, E> {
     type Output;
     type Target: OutTarget<Shape = S, Element = E, Data = Self::Data, Output = Self::Output>;
 
-    fn build_with_shape(self, shape: S) -> Self::Target;
+    fn build_shape(self, shape: S) -> Self::Target;
 }
 
 pub trait OutTarget: IntoViewMut {
@@ -1048,51 +911,47 @@ pub trait OutTarget: IntoViewMut {
     fn output(self) -> Self::Output;
 }
 
-impl<'a, S: Shape, E, D> IntoTargetShape for &'a mut Array<S, E, D> {
+impl<'a, S: Shape, E, D> IntoTargetShape<E> for &'a mut Array<S, E, D> {
     type Shape = S;
-    type Element = E;
     type Data = D;
     type Output = ();
     type Target = ViewMut<'a, S, E, D>;
 
     fn build(self) -> Self::Target {
-        self.view_mut_or_fail()
+        self.view_mut()
     }
 }
 
-impl<'a, S: Shape, S2: Shape + IntoShape<S>, E, D> IntoTarget<S, E> for &'a mut Array<S2, E, D> {
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoTarget<S, E> for &'a mut Array<S2, E, D> {
     type Data = D;
     type Output = ();
     type Target = ViewMut<'a, S, E, D>;
 
-    fn build_with_shape(self, _shape: S) -> Self::Target {
-        // TODO assert shapes equal?
-        self.view_mut_or_fail()
+    fn build_shape(self, shape: S) -> Self::Target {
+        self.view_mut_or_fail(shape)
     }
 }
 
-impl<'a, S: Shape, E, D> IntoTargetShape for &'a mut ViewMut<'a, S, E, D> {
+impl<'a, S: Shape, E, D> IntoTargetShape<E> for &'a mut ViewMut<'a, S, E, D> {
     type Shape = S;
-    type Element = E;
     type Data = D;
     type Output = ();
     type Target = ViewMut<'a, S, E, D>;
 
     fn build(self) -> Self::Target {
-        self.view_mut_or_fail()
+        self.view_mut()
     }
 }
 
-impl<'a, S: Shape, S2: Shape + IntoShape<S>, E, D> IntoTarget<S, E>
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoTarget<S, E>
     for &'a mut ViewMut<'a, S2, E, D>
 {
     type Data = D;
     type Output = ();
     type Target = ViewMut<'a, S, E, D>;
 
-    fn build_with_shape(self, _shape: S) -> Self::Target {
-        // TODO assert shapes equal?
-        self.view_mut_or_fail()
+    fn build_shape(self, shape: S) -> Self::Target {
+        self.view_mut_or_fail(shape)
     }
 }
 
@@ -1104,20 +963,16 @@ impl<'a, S: Shape, E, D> OutTarget for ViewMut<'a, S, E, D> {
     }
 }
 
-pub struct AllocShape<S: Shape, E> {
-    shape: S,
-    element: marker::PhantomData<E>,
-}
+pub struct AllocShape<S: Shape>(S);
 
-impl<'a, S: Shape, E: Default + Clone> IntoTargetShape for AllocShape<S, E> {
+impl<'a, S: Shape, E: Default + Clone> IntoTargetShape<E> for AllocShape<S> {
     type Shape = S;
-    type Element = E;
     type Data = Vec<E>;
     type Output = Self::Target;
     type Target = Array<S, E, Self::Data>;
 
     fn build(self) -> Self::Target {
-        let AllocShape { shape, .. } = self;
+        let AllocShape(shape) = self;
         Array {
             shape,
             strides: shape.default_strides(),
@@ -1128,14 +983,14 @@ impl<'a, S: Shape, E: Default + Clone> IntoTargetShape for AllocShape<S, E> {
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> IntoTarget<S, E> for AllocShape<S, E> {
+impl<'a, S: Shape, E: Default + Clone> IntoTarget<S, E> for AllocShape<S> {
     type Data = Vec<E>;
     type Output = Self::Target;
     type Target = Array<S, E, Self::Data>;
 
-    fn build_with_shape(self, _shape: S) -> Self::Target {
+    fn build_shape(self, _shape: S) -> Self::Target {
         // TODO assert shapes equal?
-        let AllocShape { shape, .. } = self;
+        let AllocShape(shape) = self;
         Array {
             shape,
             strides: shape.default_strides(),
@@ -1153,7 +1008,7 @@ impl<'a, S: Shape, E: Default + Clone> IntoTarget<S, E> for Alloc {
     type Output = Self::Target;
     type Target = Array<S, E, Self::Data>;
 
-    fn build_with_shape(self, shape: S) -> Self::Target {
+    fn build_shape(self, shape: S) -> Self::Target {
         Array {
             shape,
             strides: shape.default_strides(),
@@ -1217,18 +1072,29 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        Alloc, AllocShape, Array, AsIndex, Const, DefiniteRange, IntoShape, IntoTarget,
-        IntoTargetShape, IntoView, IntoViewMut, OutTarget, Shape,
+        Alloc, AllocShape, Array, AsIndex, Const, DefiniteRange, IntoTarget, IntoTargetShape,
+        IntoView, IntoViewMut, OutTarget, Shape, ShapeEqBase,
     };
     use std::marker::PhantomData;
 
     #[test]
     fn test_shapes() {
-        let mut _s = (Const::<3>, Const::<4>);
-        _s = (Const::<3>, Const::<4>).into_shape_fail();
-        _s = (Const::<3>, 4).into_shape_fail();
-        _s = (3, 4).into_shape_fail();
-        _s = [3, 4].into_shape_fail();
+        let s = (Const::<3>, Const::<4>);
+        assert!(s.shape_eq(&(Const::<3>, Const::<4>)));
+        assert!(s.shape_eq(&(Const::<3>, 4)));
+        assert!(s.shape_eq(&(3, 4)));
+        assert!(s.shape_eq(&[3, 4]));
+        assert!(!s.shape_eq(&(Const::<3>, 5)));
+        assert!(!s.shape_eq(&(3, 5)));
+        assert!(!s.shape_eq(&[3, 5]));
+
+        assert!((Const::<3>, Const::<4>).shape_eq(&s));
+        assert!((Const::<3>, 4).shape_eq(&s));
+        assert!((3, 4).shape_eq(&s));
+        assert!([3, 4].shape_eq(&s));
+        assert!(!(Const::<3>, 5).shape_eq(&s));
+        assert!(!(3, 5).shape_eq(&s));
+        assert!(![3, 5].shape_eq(&s));
     }
 
     #[test]
@@ -1270,7 +1136,7 @@ mod test {
         ) -> <O::Target as OutTarget>::Output {
             let c_m = c_m.view();
 
-            let mut target = out.build_with_shape(c_m.shape);
+            let mut target = out.build_shape(c_m.shape);
             let mut out_view = target.view_mut();
 
             // XXX
@@ -1348,9 +1214,7 @@ mod test {
 
     #[test]
     fn test_ones() {
-        fn ones<O: IntoTargetShape<Element = f32, Data: AsRef<[f32]> + AsMut<[f32]>>>(
-            out: O,
-        ) -> O::Output {
+        fn ones<O: IntoTargetShape<f32, Data: AsRef<[f32]> + AsMut<[f32]>>>(out: O) -> O::Output {
             let mut target = out.build();
             let mut out_view = target.view_mut();
 
@@ -1370,9 +1234,6 @@ mod test {
         };
 
         ones(&mut a);
-        ones(AllocShape {
-            shape: [4, 4],
-            element: PhantomData,
-        });
+        ones(AllocShape([4, 4]));
     }
 }
