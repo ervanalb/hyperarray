@@ -120,7 +120,7 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + ShapeEq
         Self: ShapeEq<S>,
     {
         if !self.shape_eq(other) {
-            panic!("Shapes do not match: expected={self:?} got={other:?}");
+            panic!("Shapes do not match: {self:?} != {other:?}");
         }
     }
 }
@@ -531,7 +531,7 @@ pub trait IntoView {
     fn view(&self) -> View<Self::Shape, Self::Element, Self::Data>;
 
     /// Attempt to view with the given shape type, panicking if the given shape type is not compatible
-    fn view_or_fail<S: Shape>(&self, shape: S) -> View<S, Self::Element, Self::Data>
+    fn view_with_shape<S: Shape>(&self, shape: S) -> View<S, Self::Element, Self::Data>
     where
         Self::Shape: ShapeEq<S>;
 }
@@ -551,7 +551,7 @@ impl<S: Shape, E, D> IntoView for Array<S, E, D> {
         }
     }
 
-    fn view_or_fail<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
+    fn view_with_shape<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
     where
         Self::Shape: ShapeEq<S2>,
     {
@@ -560,7 +560,7 @@ impl<S: Shape, E, D> IntoView for Array<S, E, D> {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
+            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
             data: &self.data,
         }
     }
@@ -581,7 +581,7 @@ impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
         }
     }
 
-    fn view_or_fail<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
+    fn view_with_shape<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
     where
         Self::Shape: ShapeEq<S2>,
     {
@@ -590,7 +590,7 @@ impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
+            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
             data: self.data,
         }
     }
@@ -611,7 +611,7 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
         }
     }
 
-    fn view_or_fail<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
+    fn view_with_shape<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
     where
         Self::Shape: ShapeEq<S2>,
     {
@@ -620,7 +620,7 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
+            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
             data: self.data,
         }
     }
@@ -646,7 +646,10 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
 pub trait IntoViewMut: IntoView {
     fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data>;
 
-    fn view_mut_or_fail<S: Shape>(&mut self, shape: S) -> ViewMut<'_, S, Self::Element, Self::Data>
+    fn view_mut_with_shape<S: Shape>(
+        &mut self,
+        shape: S,
+    ) -> ViewMut<'_, S, Self::Element, Self::Data>
     where
         Self::Shape: ShapeEq<S>;
 }
@@ -657,12 +660,12 @@ impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
             shape: self.shape.clone(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.clone(), // Shouldn't fail if shapes didn't fail
+            strides: self.strides.clone(), // Shouldn't fail if shapes match
             data: &mut self.data,
         }
     }
 
-    fn view_mut_or_fail<S2: Shape>(
+    fn view_mut_with_shape<S2: Shape>(
         &mut self,
         shape: S2,
     ) -> ViewMut<'_, S2, Self::Element, Self::Data>
@@ -674,7 +677,7 @@ impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
+            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
             data: &mut self.data,
         }
     }
@@ -686,12 +689,12 @@ impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
             shape: self.shape.clone(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.clone(), // Shouldn't fail if shapes didn't fail
+            strides: self.strides.clone(), // Shouldn't fail if shapes match
             data: self.data,
         }
     }
 
-    fn view_mut_or_fail<S2: Shape>(
+    fn view_mut_with_shape<S2: Shape>(
         &mut self,
         shape: S2,
     ) -> ViewMut<'_, S2, Self::Element, Self::Data>
@@ -703,7 +706,7 @@ impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes didn't fail
+            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
             data: self.data,
         }
     }
@@ -882,27 +885,18 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 /// ```
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut View`.
-
-pub trait IntoTargetShape<E> {
-    type Shape: Shape;
-    type Data;
-    type Output;
-    type Target: OutTarget<
-        Shape = Self::Shape,
-        Element = E,
-        Data = Self::Data,
-        Output = Self::Output,
-    >;
-
-    fn build(self) -> Self::Target;
-}
-
-pub trait IntoTarget<S: Shape, E> {
+pub trait IntoArbTarget<S: Shape, E> {
     type Data;
     type Output;
     type Target: OutTarget<Shape = S, Element = E, Data = Self::Data, Output = Self::Output>;
 
     fn build_shape(self, shape: S) -> Self::Target;
+}
+
+pub trait IntoTarget<E>: IntoArbTarget<Self::Shape, E> {
+    type Shape: Shape;
+
+    fn build(self) -> Self::Target;
 }
 
 pub trait OutTarget: IntoViewMut {
@@ -911,39 +905,25 @@ pub trait OutTarget: IntoViewMut {
     fn output(self) -> Self::Output;
 }
 
-impl<'a, S: Shape, E, D> IntoTargetShape<E> for &'a mut Array<S, E, D> {
-    type Shape = S;
-    type Data = D;
-    type Output = ();
-    type Target = ViewMut<'a, S, E, D>;
-
-    fn build(self) -> Self::Target {
-        self.view_mut()
-    }
-}
-
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoTarget<S, E> for &'a mut Array<S2, E, D> {
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoArbTarget<S, E> for &'a mut Array<S2, E, D> {
     type Data = D;
     type Output = ();
     type Target = ViewMut<'a, S, E, D>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        self.view_mut_or_fail(shape)
+        self.view_mut_with_shape(shape)
     }
 }
 
-impl<'a, S: Shape, E, D> IntoTargetShape<E> for &'a mut ViewMut<'a, S, E, D> {
+impl<'a, S: Shape, E, D> IntoTarget<E> for &'a mut Array<S, E, D> {
     type Shape = S;
-    type Data = D;
-    type Output = ();
-    type Target = ViewMut<'a, S, E, D>;
 
     fn build(self) -> Self::Target {
         self.view_mut()
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoTarget<S, E>
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoArbTarget<S, E>
     for &'a mut ViewMut<'a, S2, E, D>
 {
     type Data = D;
@@ -951,7 +931,15 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoTarget<S, E>
     type Target = ViewMut<'a, S, E, D>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        self.view_mut_or_fail(shape)
+        self.view_mut_with_shape(shape)
+    }
+}
+
+impl<'a, S: Shape, E, D> IntoTarget<E> for &'a mut ViewMut<'a, S, E, D> {
+    type Shape = S;
+
+    fn build(self) -> Self::Target {
+        self.view_mut()
     }
 }
 
@@ -965,45 +953,127 @@ impl<'a, S: Shape, E, D> OutTarget for ViewMut<'a, S, E, D> {
 
 pub struct AllocShape<S: Shape>(S);
 
-impl<'a, S: Shape, E: Default + Clone> IntoTargetShape<E> for AllocShape<S> {
-    type Shape = S;
-    type Data = Vec<E>;
-    type Output = Self::Target;
-    type Target = Array<S, E, Self::Data>;
+/// An output target wrapping an owned [Array],
+/// that when viewed has a different (but equal) shape
+/// than the underlying `Array`
+pub struct ArrayTarget<S: Shape, S2: Shape + ShapeEq<S>, E> {
+    array: Array<S2, E, Vec<E>>,
+    shape: S,
+}
 
-    fn build(self) -> Self::Target {
-        let AllocShape(shape) = self;
-        Array {
-            shape,
-            strides: shape.default_strides(),
+impl<S: Shape, S2: Shape + ShapeEq<S>, E> IntoView for ArrayTarget<S, S2, E> {
+    type Shape = S;
+    type Element = E;
+    type Data = Vec<E>;
+
+    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+        View {
+            shape: self.shape.clone(),
             element: marker::PhantomData,
-            offset: 0,
-            data: vec![E::default(); shape.num_elements()],
+            offset: self.array.offset,
+            strides: self.array.strides.into_index_fail(),
+            data: &self.array.data,
+        }
+    }
+
+    fn view_with_shape<S3: Shape>(&self, shape: S3) -> View<S3, Self::Element, Self::Data>
+    where
+        Self::Shape: ShapeEq<S3>,
+    {
+        self.shape.shape_mismatch_fail(&shape);
+        View {
+            shape,
+            element: marker::PhantomData,
+            offset: self.array.offset,
+            strides: self.array.strides.into_index_fail().into_index_fail(), // Shouldn't fail if
+            // shapes match
+            data: &self.array.data,
         }
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> IntoTarget<S, E> for AllocShape<S> {
-    type Data = Vec<E>;
-    type Output = Self::Target;
-    type Target = Array<S, E, Self::Data>;
-
-    fn build_shape(self, _shape: S) -> Self::Target {
-        // TODO assert shapes equal?
-        let AllocShape(shape) = self;
-        Array {
-            shape,
-            strides: shape.default_strides(),
+impl<S: Shape, S2: Shape + ShapeEq<S>, E> IntoViewMut for ArrayTarget<S, S2, E> {
+    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
+        ViewMut {
+            shape: self.shape.clone(),
             element: marker::PhantomData,
-            offset: 0,
-            data: vec![E::default(); shape.num_elements()],
+            offset: self.array.offset,
+            strides: self.array.strides.into_index_fail(),
+            data: &mut self.array.data,
+        }
+    }
+
+    fn view_mut_with_shape<S3: Shape>(
+        &mut self,
+        shape: S3,
+    ) -> ViewMut<'_, S3, Self::Element, Self::Data>
+    where
+        Self::Shape: ShapeEq<S3>,
+    {
+        self.shape.shape_mismatch_fail(&shape);
+        ViewMut {
+            shape,
+            element: marker::PhantomData,
+            offset: self.array.offset,
+            strides: self.array.strides.into_index_fail().into_index_fail(), // Shouldn't fail if
+            // shapes match
+            data: &mut self.array.data,
+        }
+    }
+}
+
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E> OutTarget for ArrayTarget<S, S2, E> {
+    type Output = Array<S2, E, Vec<E>>;
+
+    fn output(self) -> Self::Output {
+        self.array
+    }
+}
+
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoArbTarget<S, E>
+    for AllocShape<S2>
+{
+    type Data = Vec<E>;
+    type Output = Array<S2, E, Self::Data>;
+    type Target = ArrayTarget<S, S2, E>;
+
+    fn build_shape(self, shape: S) -> Self::Target {
+        let AllocShape(self_shape) = self;
+        self_shape.shape_mismatch_fail(&shape);
+        ArrayTarget {
+            shape,
+            array: Array {
+                shape: self_shape,
+                strides: self_shape.default_strides(),
+                element: marker::PhantomData,
+                offset: 0,
+                data: vec![E::default(); self_shape.num_elements()],
+            },
+        }
+    }
+}
+
+impl<'a, S: Shape, E: Default + Clone> IntoTarget<E> for AllocShape<S> {
+    type Shape = S;
+
+    fn build(self) -> Self::Target {
+        let AllocShape(shape) = self;
+        ArrayTarget {
+            shape,
+            array: Array {
+                shape,
+                strides: shape.default_strides(),
+                element: marker::PhantomData,
+                offset: 0,
+                data: vec![E::default(); shape.num_elements()],
+            },
         }
     }
 }
 
 pub struct Alloc;
 
-impl<'a, S: Shape, E: Default + Clone> IntoTarget<S, E> for Alloc {
+impl<'a, S: Shape, E: Default + Clone> IntoArbTarget<S, E> for Alloc {
     type Data = Vec<E>;
     type Output = Self::Target;
     type Target = Array<S, E, Self::Data>;
@@ -1072,7 +1142,7 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        Alloc, AllocShape, Array, AsIndex, Const, DefiniteRange, IntoTarget, IntoTargetShape,
+        Alloc, AllocShape, Array, AsIndex, Const, DefiniteRange, IntoArbTarget, IntoTarget,
         IntoView, IntoViewMut, OutTarget, Shape, ShapeEqBase,
     };
     use std::marker::PhantomData;
@@ -1129,7 +1199,7 @@ mod test {
 
         fn bernstein_coef<
             V: IntoView<Element = f32, Data: AsRef<[f32]>>,
-            O: IntoTarget<V::Shape, f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
+            O: IntoArbTarget<V::Shape, f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
         >(
             c_m: &V,
             out: O,
@@ -1177,20 +1247,22 @@ mod test {
             data: vec![1., 2., 3., 4.],
         };
 
-        let mut b = Array {
+        /*let mut b = Array {
             shape: [2, 2],
             strides: [2, 2].default_strides(),
             element: PhantomData,
             offset: 0,
             data: vec![0.; 4],
-        };
+        };*/
 
         //bernstein_coef(&a, &mut b.view_mut());
         //bernstein_coef(&a.view(), &mut b);
 
-        bernstein_coef(&a, Alloc);
+        dbg!(bernstein_coef(&a, Alloc));
+        dbg!(bernstein_coef(&a, AllocShape([2, 2])));
+        panic!();
 
-        bernstein_coef(&a, &mut b);
+        //bernstein_coef(&a, &mut b);
     }
 
     #[test]
@@ -1214,7 +1286,7 @@ mod test {
 
     #[test]
     fn test_ones() {
-        fn ones<O: IntoTargetShape<f32, Data: AsRef<[f32]> + AsMut<[f32]>>>(out: O) -> O::Output {
+        fn ones<O: IntoTarget<f32, Data: AsRef<[f32]> + AsMut<[f32]>>>(out: O) -> O::Output {
             let mut target = out.build();
             let mut out_view = target.view_mut();
 
