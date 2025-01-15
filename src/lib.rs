@@ -3,12 +3,12 @@ use std::fmt;
 use std::marker;
 use std::ops;
 
-/// Represents the dimension of one axis of multi-dimensional data.
-/// These types may represent a constant known at compile-time (e.g. `Const<3>`)
-/// or runtime (e.g. `usize`),
+/// Represents the length of one axis of multi-dimensional data.
+/// This may be a `usize`, (e.g. 3), or
+/// a compile-time constant (e.g. `Const<3>`)
 pub trait Dim: 'static + Sized + Clone + Copy + fmt::Debug + Into<usize> + PartialEq {}
 
-/// Represents a dimension known at compile time.
+/// Represents an axis length known at compile time.
 /// The primitive type `usize` is used for a dimension not known at compile time.
 #[derive(Default, Clone, Copy)]
 pub struct Const<const N: usize>;
@@ -47,31 +47,83 @@ impl<const N: usize> cmp::PartialEq<Const<N>> for Const<N> {
     }
 }
 
+/// A trait indicating that a type can be viewed as an [Index].
+///
+/// This is a convenience trait that unifies [Shape] and `Index`
+/// for situations where either is applicable, such as ranges.
+///
+/// An `Index` always as an in-memory representation,
+/// so this will manifest any compile-time constants in the `Shape`.
+///
+/// ```
+/// use nada::{Const, AsIndex};
+///
+/// let a = (Const::<3>, Const::<4>);
+/// let b = [5, 6];
+///
+/// assert_eq!(a.as_index(), [3, 4]);
+/// assert_eq!(b.as_index(), [5, 6]);
+/// ```
+///
 pub trait AsIndex {
     type Index: Index;
 
-    /// Get the value of this index in memory.
-    /// For example, `(Const::<3>, 4).d()` is `[3, 4]`.
-    ///
-    /// One case where this is useful if you want to mutate the values--
-    /// you can't increment the first dimension of `(Const::<3>, 4)`
-    /// but you can increment the first dimension of `[3, 4]`.
+    /// Express this value as an index
     fn as_index(&self) -> Self::Index;
 }
 
-/// Represents dimensions of multi-dimensional data.
-/// These types may represent constants known at compile-time (e.g. (Const<3>, Const<4>))
-/// or runtime (e.g. [usize; 2])
-/// or a mix: (usize, Const<2>)
+/// Represents length of each axis of multi-dimensional data.
+/// This may be a tuple of [Dim], i.e. `usize` / `Const<N>`,
+/// or a fixed-length array of `usize`.
+/// Each element corresponds to one axis length.
 ///
-/// Note that "index" and "shape" are conceptually the same type,
-/// and this trait represents either.
-pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + ShapeEqBase<Self> {
+/// ```
+/// // Several shape representations that are equivalent:
+///
+/// use nada::{Const, ShapeEq};
+///
+/// let s = (Const::<3>, Const::<4>);
+///
+/// assert!(s.shape_eq(&(Const::<3>, Const::<4>)));
+/// assert!(s.shape_eq(&(Const::<3>, 4)));
+/// assert!(s.shape_eq(&(3, 4)));
+/// assert!(s.shape_eq(&[3, 4]));
+/// ```
+///
+/// Since there are multiple equivalent `Shape` representations,
+/// **no two shapes should be assumed to be the same type**,
+/// even when expressing a "same shapes" type bound.
+/// The correct way to handle this is using two generic Shape types
+/// that are linked by the [ShapeEq] trait.
+/// `ShapeEq` is not implemented for shapes that are guaranteed incompatible at compile-time,
+/// so shape mismatches
+///
+/// ```
+/// use nada::{Shape, ShapeEq, Const};
+///
+/// fn check_same_shapes<S1: Shape + ShapeEq<S2>, S2: Shape>(a: S1, b: S2) {
+///     if a.shape_eq(&b) {
+///         println!("{a:?} == {b:?}");
+///     } else {
+///         println!("{a:?} != {b:?}");
+///     }
+/// }
+///
+/// check_same_shapes((Const::<5>, 6), (Const::<5>, Const::<6>)); // Equal
+/// check_same_shapes((Const::<5>, 7), (Const::<5>, Const::<6>)); // Not equal at runtime
+/// //check_same_shapes((Const::<4>, 6), (Const::<5>, Const::<6>)); // Not equal at compile time (type error)
+/// ```
+pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
     // Provided methods
 
-    /// How many total elements are contained within a multi-dimensional data
+    /// How many total elements are contained within multi-dimensional data
     /// of this shape.
-    /// For example, `[3, 4].num_elements()` is `12`
+    ///
+    /// ```
+    /// use nada::Shape;
+    ///
+    /// assert_eq!([3, 4].num_elements(), 12)
+    /// ```
     fn num_elements(&self) -> usize {
         self.as_index().into_iter().product()
     }
@@ -81,9 +133,13 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + ShapeEq
     /// where the first axis changes slowest as you traverse the data
     /// (i.e. has the largest stride.)
     ///
-    /// For example, [3, 4].strides() is `[4, 1]`
-    /// since moving one unit along the first axis requires a stride of 4 elements,
-    /// and moving one unit along the second axis requires a stride of 1 element.
+    /// ```
+    /// use nada::Shape;
+    ///
+    /// assert_eq!([3, 4].default_strides(), [4, 1]);
+    /// // moving one unit along the first axis requires a stride of 4 elements,
+    /// // moving one unit along the second axis requires a stride of 1 element.
+    /// ```
     fn default_strides(&self) -> Self::Index {
         let mut result = Self::Index::zero();
         let mut acc = 1;
@@ -99,8 +155,13 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + ShapeEq
     }
 
     /// Panics if the given index is out-of-bounds for data of this shape.
-    /// This should only be used for comparing shapes
-    /// since the panic message uses that terminology
+    ///
+    /// ```
+    /// use nada::Shape;
+    ///
+    /// let shape = [2, 6];
+    /// shape.out_of_bounds_fail(&[1, 5]); // No panic, since 1 < 2 and 5 < 6
+    /// ```
     fn out_of_bounds_fail(&self, idx: &Self::Index) {
         for (i, s) in idx.into_iter().zip(self.as_index().into_iter()) {
             if i >= s {
@@ -109,9 +170,20 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + ShapeEq
         }
     }
 
-    /// Panics if the given index does not equal the given index.
-    /// This should probably only be used for comparing shapes
-    /// since the panic message uses that terminology
+    /// Panics if the given shape does not equal this shape.
+    ///
+    /// Fails to compile if the two shape types could never hold equal values,
+    /// such as `(Const::<2>,)` and `(Const::<3>,)`,
+    /// or `[2, 3]` and `[2, 3, 4]`
+    /// (see [ShapeEq])
+    ///
+    /// ```
+    /// use nada::{Const, Shape};
+    ///
+    /// let shape1 = [2, 3];
+    /// let shape2 = (Const::<2>, Const::<3>);
+    /// shape1.shape_mismatch_fail(&shape2); // No panic, since the shapes are the same
+    /// ```
     fn shape_mismatch_fail<S: Shape>(&self, other: &S)
     where
         Self: ShapeEq<S>,
@@ -122,8 +194,12 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex + ShapeEq
     }
 }
 
-/// A sub-trait of Index that contains no compile-time constants (all components are stored in memory as `usize`.)
-/// This opens up additional possibilities like indexing with brackets and `iter_mut()`.
+/// Represents the coordinates of an element in multi-dimensional data,
+/// e.g. a 2D index might be represented as `[usize; 2]`.
+/// Each element corresponds to the index along that axis.
+///
+/// Unlike [Shape], the coordinates of an `Index` are always type `usize`.
+/// Every `Shape` type has a corresponding `Index` type
 pub trait Index:
     'static
     + Sized
@@ -133,15 +209,22 @@ pub trait Index:
     + ops::IndexMut<usize>
     + IntoIterator<Item = usize, IntoIter: DoubleEndedIterator + ExactSizeIterator>
     + AsIndex<Index = Self>
-    + FromIndex<Self>
 {
     // Required methods
 
     // TODO I don't think this method is well-formed for dynamic number of dimensions
     fn zero() -> Self;
 
-    /// Converts this multi-dimensional index to a 1-dimensional index (usize.)
+    /// Converts this multi-dimensional index into a linear index
+    /// by multiplying each coordinate by the corresponding stride.
     /// No bounds checking is performed.
+    ///
+    /// ```
+    /// use nada::Index;
+    ///
+    /// let strides = [4, 1];
+    /// assert_eq!([3, 5].to_i(&strides), 3 * 4 + 5 * 1);
+    /// ```
     fn to_i(&self, strides: &Self) -> usize {
         strides
             .into_iter()
@@ -152,39 +235,48 @@ pub trait Index:
 
     /// Returns an iterator over the components of this index,
     /// that allows modifying the components.
+    ///
+    /// For non-mutable iteration, use `.into_iter()`.
+    ///
+    /// ```
+    /// use nada::Index;
+    ///
+    /// let mut i = [3, 5];
+    ///
+    /// for e in i.iter_mut() {
+    ///     *e *= 2;
+    /// }
+    ///
+    /// assert_eq!(i, [6, 10]);
+    /// ```
+    // TODO use into_iter for mutable iteration too?
     fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, usize>;
 }
 
-/// This index can be converted from another index.
-/// This trait is implemented for all conversions that have some chance of success,
-/// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
+/// This [Shape] is equal to another `Shape`.
+/// This trait is implemented for all pairs of shapes that have some chance of success,
+/// e.g. `[usize; 1] -> (Const<3>,)` (at runtime, the usize is checked to be 3.)
 /// It is not implemented for conversions that have no chance of success at compile time
-/// e.g. Const<4> -> Const<3>
-pub trait ShapeEqBase<O>: Sized {
-    // Required methods
-
+/// e.g. `(Const<4>, Const<5>) -> (Const<4>, Const<6>)`
+pub trait ShapeEq<O: Shape>: Shape<Index: IntoIndex<O::Index>> {
+    /// Return `true` if the shapes are equal, `false` if they are not.
     fn shape_eq(&self, other: &O) -> bool;
 }
 
-pub trait ShapeEq<T: Shape>: Shape<Index: IntoIndex<T::Index>> + ShapeEqBase<T> {}
-impl<T: Shape<Index: IntoIndex<U::Index>> + ShapeEqBase<U>, U: Shape> ShapeEq<U> for T where
-    U: ShapeEqBase<T>
-{
-}
-
-/// This index can be converted from another index.
-/// This trait is implemented for all conversions that have some chance of success,
-/// e.g. usize -> Const<3> (at runtime, the usize is checked to be 3.)
+/// This [Index] type can be converted from another index.
+/// This trait is implemented for all conversions that have some chance of success.
 /// It is not implemented for conversions that have no chance of success at compile time
-/// e.g. Const<4> -> Const<3>
-pub trait FromIndex<O: Index>: Sized {
-    // Required methods
-
-    /// Convert to this index from the given compile-time compatible index,
+/// e.g. `[usize; 2] -> [usize; 3]`
+///
+/// If two [Shapes](Shape) are equal, then their indices are compatible
+/// and these conversions will never fail
+/// (although you still must perform the type conversion with `from_index_fail`.)
+///
+/// See also: [IntoIndex].
+pub trait FromIndex<O: Index>: Index {
+    /// Convert to the given index into this compatible index type,
     /// returning None if they turn out not to be compatible at runtime.
     fn try_from_index(other: O) -> Option<Self>;
-
-    // Provided methods
 
     /// Convert to this index from the given compile-time compatible index,
     /// panicking if they turn out not to be compatible at runtime.
@@ -198,14 +290,22 @@ pub trait FromIndex<O: Index>: Sized {
     }
 }
 
-pub trait IntoIndex<T>: Index {
-    // Required methods
-
+/// This [Index] can be converted into another index type.
+///
+/// This trait is implemented for all conversions that have some chance of success.
+/// It is not implemented for conversions that have no chance of success at compile time
+/// e.g. `[usize; 2] -> [usize; 3]`
+///
+/// If two [Shapes](Shape) are equal, then their indices are compatible
+/// and these conversions will never fail
+/// (although you still must perform the type conversion with `into_index_fail`.)
+///
+/// If you are implementing this trait, prefer [FromIndex] since
+/// `IntoIndex` has a blanket implementation for `FromIndex`.
+pub trait IntoIndex<T: Index>: Index {
     /// Convert from this index into the given compile-time compatible index,
     /// returning None if they turn out not to be compatible at runtime.
     fn try_into_index(self) -> Option<T>;
-
-    // Provided methods
 
     /// Convert from this index into the given compile-time compatible index,
     /// panicking if they turn out not to be compatible at runtime.
@@ -216,13 +316,9 @@ impl<T: Index, U> IntoIndex<U> for T
 where
     U: FromIndex<T>,
 {
-    // Required methods
-
     fn try_into_index(self) -> Option<U> {
         U::try_from_index(self)
     }
-
-    // Provided methods
 
     fn into_index_fail(self) -> U {
         U::from_index_fail(self)
@@ -239,7 +335,7 @@ impl<const N: usize> AsIndex for [usize; N] {
 
 impl<const N: usize> Shape for [usize; N] {}
 
-impl<const N: usize> ShapeEqBase<[usize; N]> for [usize; N] {
+impl<const N: usize> ShapeEq<[usize; N]> for [usize; N] {
     fn shape_eq(&self, other: &[usize; N]) -> bool {
         self == other
     }
@@ -271,19 +367,19 @@ impl<D1: Dim> AsIndex for (D1,) {
 
 impl<D1: Dim> Shape for (D1,) {}
 
-impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEqBase<(E1,)> for (D1,) {
+impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEq<(E1,)> for (D1,) {
     fn shape_eq(&self, other: &(E1,)) -> bool {
         self.0 == other.0
     }
 }
 
-impl<D1: Dim + cmp::PartialEq<usize>> ShapeEqBase<[usize; 1]> for (D1,) {
+impl<D1: Dim + cmp::PartialEq<usize>> ShapeEq<[usize; 1]> for (D1,) {
     fn shape_eq(&self, other: &[usize; 1]) -> bool {
         self.0 == other[0]
     }
 }
 
-impl<D1: Dim> ShapeEqBase<(D1,)> for [usize; 1]
+impl<D1: Dim> ShapeEq<(D1,)> for [usize; 1]
 where
     usize: PartialEq<D1>,
 {
@@ -302,7 +398,7 @@ impl<D1: Dim, D2: Dim> AsIndex for (D1, D2) {
 
 impl<D1: Dim, D2: Dim> Shape for (D1, D2) {}
 
-impl<D1: Dim + PartialEq<E1>, D2: Dim + PartialEq<E2>, E1: Dim, E2: Dim> ShapeEqBase<(E1, E2)>
+impl<D1: Dim + PartialEq<E1>, D2: Dim + PartialEq<E2>, E1: Dim, E2: Dim> ShapeEq<(E1, E2)>
     for (D1, D2)
 {
     fn shape_eq(&self, other: &(E1, E2)) -> bool {
@@ -310,13 +406,13 @@ impl<D1: Dim + PartialEq<E1>, D2: Dim + PartialEq<E2>, E1: Dim, E2: Dim> ShapeEq
     }
 }
 
-impl<D1: Dim + PartialEq<usize>, D2: Dim + PartialEq<usize>> ShapeEqBase<[usize; 2]> for (D1, D2) {
+impl<D1: Dim + PartialEq<usize>, D2: Dim + PartialEq<usize>> ShapeEq<[usize; 2]> for (D1, D2) {
     fn shape_eq(&self, other: &[usize; 2]) -> bool {
         self.0 == other[0] && self.1 == other[1]
     }
 }
 
-impl<D1: Dim, D2: Dim> ShapeEqBase<(D1, D2)> for [usize; 2]
+impl<D1: Dim, D2: Dim> ShapeEq<(D1, D2)> for [usize; 2]
 where
     usize: PartialEq<D1>,
     usize: PartialEq<D2>,
@@ -328,6 +424,7 @@ where
 
 /////////////////////////////////////////////
 
+// TODO Get rid of DefiniteRange trait
 pub trait DefiniteRange: Sized {
     type Item: Index;
 
@@ -460,12 +557,10 @@ impl<I: Shape> DefiniteRange for ops::RangeInclusive<I> {
 
 /////////////////////////////////////////////
 
-// Wrappers for array data
-// Three kinds: owned, ref, mut
-
 /// A multi-dimensional array.
 ///
 /// This type owns the underlying data.
+/// For a non-owning types, see [View] and [ViewMut],
 #[derive(Debug, Clone)]
 pub struct Array<S: Shape, D> {
     shape: S,
@@ -501,27 +596,48 @@ pub struct ViewMut<'a, S: Shape, D: ?Sized> {
 }
 
 /// This trait marks anything which can represent a read-only view into multi-dimensional data,
+/// with the given shape.
+///
+/// Using this trait allows functions to accept any kind of read-only multi-dimensional data
+/// with a given shape. For example:
+/// ```
+/// use nada::{IntoViewWithShape, Const};
+///
+/// // This function requires a 2x2 input
+/// fn det2(a: &impl IntoViewWithShape<(Const<2>, Const<2>), [f32]>) -> f32 {
+///     let a = a.view_with_shape((Const, Const)); // Convert to concrete type View
+///
+///     a[[0,0]] * a[[1,1]] - a[[0, 1]] * a[[1,0]]
+/// }
+/// ```
+///
+/// This `det2` function can now accept `&Array`, `&View`, or `&ViewMut`.
+pub trait IntoViewWithShape<S: Shape, D: ?Sized> {
+    fn view_with_shape(&self, shape: S) -> View<S, D>;
+}
+
+/// This trait marks anything which can represent a read-only view into multi-dimensional data,
 /// such as:
-/// * Array
-/// * View
-/// * ViewMut
+/// * [Array]
+/// * [View]
+/// * [ViewMut]
 ///
 /// Using this trait allows functions to accept any kind of read-only multi-dimensional data. For example:
 /// ```
-/// fn sum(a: &impl IntoView<Element=f32, Data: ops::Deref<Target=[f32]>>) -> f32 {
+/// use nada::IntoView;
+///
+/// // This function can take any dimension input
+/// fn sum(a: &impl IntoView<[f32]>) -> f32 {
 ///     let a = a.view(); // Convert to concrete type View
 ///
+///     // Iterate and sum
 ///     a.into_iter().sum()
 /// }
 /// ```
 ///
 /// This `sum` function can now accept `&Array`, `&View`, or `&ViewMut`.
-
-pub trait IntoViewWithShape<S: Shape, D: ?Sized> {
-    fn view_with_shape(&self, shape: S) -> View<S, D>;
-}
-
 pub trait IntoView<D: ?Sized>: IntoViewWithShape<Self::NativeShape, D> {
+    // The native shape type of this data
     type NativeShape: Shape;
 
     fn view(&self) -> View<Self::NativeShape, D>;
@@ -541,7 +657,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>>
     }
 }
 
-impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D>> IntoView<D> for Array<S, D2> {
+impl<S: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>> IntoView<D> for Array<S, D2> {
     type NativeShape = S;
 
     fn view(&self) -> View<S, D> {
@@ -566,7 +682,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewWithShape<S, D> for Vi
     }
 }
 
-impl<S: Shape, D: ?Sized> IntoView<D> for View<'_, S, D> {
+impl<S: Shape + ShapeEq<S>, D: ?Sized> IntoView<D> for View<'_, S, D> {
     type NativeShape = S;
 
     fn view(&self) -> View<S, D> {
@@ -591,7 +707,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewWithShape<S, D> for Vi
     }
 }
 
-impl<S: Shape, D: ?Sized> IntoView<D> for ViewMut<'_, S, D> {
+impl<S: Shape + ShapeEq<S>, D: ?Sized> IntoView<D> for ViewMut<'_, S, D> {
     type NativeShape = S;
 
     fn view(&self) -> View<S, D> {
@@ -605,26 +721,47 @@ impl<S: Shape, D: ?Sized> IntoView<D> for ViewMut<'_, S, D> {
 }
 
 /// This trait marks anything which can represent a mutable view into multi-dimensional data,
+/// with the given shape.
+///
+/// Using this trait allows functions to accept any kind of mutable multi-dimensional data
+/// with a given shape. For example:
+/// ```
+/// use nada::{IntoViewMutWithShape, Const};
+///
+/// // This function requires a 2x2 input
+/// fn transpose_assign2(a: &mut impl IntoViewMutWithShape<(Const<2>, Const<2>), [f32]>) {
+///     let mut a = a.view_mut_with_shape((Const, Const)); // Convert to concrete type View
+///
+///     a[[0, 1]] = a[[1,0]];
+/// }
+/// ```
+///
+/// This `transpose_assign2` function can now accept `&mut Array` or `&ViewMut`.
+pub trait IntoViewMutWithShape<S: Shape, D: ?Sized>: IntoViewWithShape<S, D> {
+    fn view_mut_with_shape(&mut self, shape: S) -> ViewMut<'_, S, D>;
+}
+
+/// This trait marks anything which can represent a mutable view into multi-dimensional data,
 /// such as:
-/// * Array
-/// * ViewMut
+/// * [Array]
+/// * [ViewMut]
 ///
 /// Using this trait allows functions to accept any kind of mutable multi-dimensional data. For example:
 /// ```
-/// fn increment(a: &mut impl IntoView<Element=i32, Data: ops::Deref<Target=[i32]> + ops::DerefMut<Target=[i32]>>) -> i32 {
+/// use nada::IntoViewMut;
+///
+/// // This function can take any dimension input
+/// fn increment(a: &mut impl IntoViewMut<[f32]>) {
 ///     let mut a = a.view_mut(); // Convert to concrete type View
 ///
-///     for e in a.into_iter() {
-///         e += 1;
+///     // Iterate and sum
+///     for e in &mut a {
+///         *e += 1.0;
 ///     }
 /// }
 /// ```
 ///
-/// This `increment` function can now accept `&mut Array` or `&mut View`.
-pub trait IntoViewMutWithShape<S: Shape, D: ?Sized>: IntoViewWithShape<S, D> {
-    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, D>;
-}
-
+/// This `increment` function can now accept `&mut Array` or `&mut ViewMut`.
 pub trait IntoViewMut<D: ?Sized>: IntoView<D> + IntoViewMutWithShape<Self::NativeShape, D> {
     fn view_mut(&mut self) -> ViewMut<Self::NativeShape, D>;
 }
@@ -636,7 +773,7 @@ impl<
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > IntoViewMutWithShape<S, D> for Array<S2, D2>
 {
-    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
+    fn view_mut_with_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
         self.shape.shape_mismatch_fail(&shape);
         ViewMut {
             shape,
@@ -647,8 +784,8 @@ impl<
     }
 }
 
-impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> IntoViewMut<D>
-    for Array<S, D2>
+impl<S: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>>
+    IntoViewMut<D> for Array<S, D2>
 {
     fn view_mut(&mut self) -> ViewMut<'_, S, D> {
         ViewMut {
@@ -663,7 +800,7 @@ impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>
 impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewMutWithShape<S, D>
     for ViewMut<'_, S2, D>
 {
-    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
+    fn view_mut_with_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
         self.shape.shape_mismatch_fail(&shape);
         ViewMut {
             shape,
@@ -674,7 +811,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewMutWithShape<S, D>
     }
 }
 
-impl<S: Shape, D: ?Sized> IntoViewMut<D> for ViewMut<'_, S, D> {
+impl<S: Shape + ShapeEq<S>, D: ?Sized> IntoViewMut<D> for ViewMut<'_, S, D> {
     fn view_mut(&mut self) -> ViewMut<'_, S, D> {
         ViewMut {
             shape: self.shape.clone(),
@@ -687,71 +824,6 @@ impl<S: Shape, D: ?Sized> IntoViewMut<D> for ViewMut<'_, S, D> {
 
 /////////////////////////////////////////////
 
-/*
-macro_rules! impl_view_methods {
-    ($struct:ident $(<$lt:lifetime>)?) => {
-        impl<S: Shape, E, D: ops::Deref<Target=[E]>> $struct<$($lt,)? S, E, D> {
-            pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
-                self.data.as_ref().get_unchecked(self.offset + idx.to_i(&self.strides))
-            }
-        }
-
-        impl<S: Shape, E, D: ops::Deref<Target=[E]>> ops::Index<S::Index> for $struct<$($lt,)? S, E, D> {
-            type Output = E;
-
-            fn index(&self, idx: S::Index) -> &E {
-                self.shape.out_of_bounds_fail(&idx);
-                unsafe { self.get_unchecked(idx) }
-            }
-        }
-
-        impl<'a, S: Shape, E, D: ops::Deref<Target=[E]>> IntoIterator for &'a $struct<$($lt,)? S, E, D> {
-            type Item = &'a E;
-            type IntoIter = NdIter<'a, S, E>;
-
-            fn into_iter(self) -> Self::IntoIter {
-                NdIter {
-                    shape: self.shape.clone(),
-                    strides: self.strides,
-                    data: &self.data.as_ref()[self.offset..],
-                    idx: (..self.shape).first(),
-                }
-            }
-        }
-    };
-}
-
-macro_rules! impl_view_mut_methods {
-    ($struct:ident $(<$lt:lifetime>)?) => {
-        impl<S: Shape, E, D: ops::Deref<Target=[E]> + ops::DerefMut> $struct<$($lt,)? S, E, D> {
-            pub unsafe fn get_unchecked_mut(&mut self, idx: S::Index) -> &mut E {
-                self.data.as_mut().get_unchecked_mut(self.offset + idx.to_i(&self.strides))
-            }
-        }
-
-        impl<S: Shape, E, D: ops::Deref<Target=[E]> + ops::DerefMut> ops::IndexMut<S::Index> for $struct<$($lt,)? S, E, D> {
-            fn index_mut(&mut self, idx: S::Index) -> &mut E {
-                self.shape.out_of_bounds_fail(&idx);
-                unsafe { self.get_unchecked_mut(idx) }
-            }
-        }
-
-        impl<'a, S: Shape, E, D: ops::Deref<Target=[E]> + ops::DerefMut> IntoIterator for &'a mut $struct<$($lt,)? S, E, D> {
-            type Item = &'a mut E;
-            type IntoIter = NdIterMut<'a, S, E>;
-
-            fn into_iter(self) -> Self::IntoIter {
-                NdIterMut {
-                    shape: self.shape.clone(),
-                    strides: self.strides,
-                    data: &mut self.data.as_mut()[self.offset..],
-                    idx: (..self.shape).first(),
-                }
-            }
-        }
-    };
-}
-*/
 impl<S: Shape, E> View<'_, S, [E]> {
     pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
         self.data
@@ -960,49 +1032,98 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 
 /////////////////////////////////////////////
 
-/// This trait marks anything which can serve as an output target for multi-dimensional data,
-/// such as:
-/// * `&mut Array`
-/// * `&mut ViewMut`
-/// * `Alloc` (a marker struct indicating that the output should be allocated on the heap at
-///   runtime.)
+/// This trait marks anything which can serve as an output target for multi-dimensional data
+/// with the given shape.
 ///
 /// Using this trait allows functions to store their results in either an existing array
 /// or a newly allocated array, at the discretion of the caller.
 ///
 /// Here is an example:
 /// ```
-/// fn ones<S: Shape>(shape: S, out: impl IntoTarget<Element=i32, Data: ops::Deref<Target=[i32]> + ops::DerefMut<Target=[i32]>>) -> i32 {
-///     let mut a = a.view_mut(); // Convert to concrete type View
+/// use nada::{IntoTargetWithShape, OutTarget, IntoViewMut, Const, alloc};
 ///
-///     for e in a.into_iter() {
-///         e += 1;
+/// // This function requires a 2x2 input
+/// fn eye2<O: IntoTargetWithShape<(Const<2>, Const<2>), [f32]>>(
+///     out: O,
+/// ) -> <O::Target as OutTarget>::Output {
+///     let mut target = out.build_shape((Const, Const)); // Perform allocation, or no-op for existing data.
+///     let mut a = target.view_mut(); // Get a mutable view of the output target
+///
+///     for ([i, j], e) in (&mut a).into_iter().nd_enumerate() {
+///         *e = if i == j { 1.0 } else { 0.0 };
 ///     }
-/// }
-/// ```
 ///
-/// This `increment` function can now accept `&mut Array` or `&mut ViewMut`.
+///     target.output() // Return the allocated array, or () for existing data
+/// }
+///
+/// // Ask the function to allocate the output:
+/// let mut a = eye2(alloc());
+///
+/// // Or store the output in an existing array:
+/// eye2(&mut a);
+/// ```
 pub trait IntoTargetWithShape<S: Shape, D: ?Sized> {
     type Target: OutTarget + IntoViewMut<D, NativeShape = S>;
 
     fn build_shape(self, shape: S) -> Self::Target;
 }
 
+/// This trait marks anything which can serve as an output target for multi-dimensional data.
+///
+/// Using this trait allows functions to store their results in either an existing array
+/// or a newly allocated array, at the discretion of the caller.
+///
+/// Here is an example:
+/// ```
+/// use nada::{IntoTarget, OutTarget, IntoViewMut, Const, alloc_shape};
+///
+/// fn ones<O: IntoTarget<[f32]>>(
+///     out: O,
+/// ) -> <O::Target as OutTarget>::Output {
+///     let mut target = out.build(); // Perform allocation, or no-op for existing data.
+///     let mut a = target.view_mut(); // Get a mutable view of the output target
+///
+///     for e in &mut a {
+///         *e = 1.0;
+///     }
+///
+///     target.output() // Return the allocated array, or () for existing data
+/// }
+///
+/// // Ask the function to allocate the output:
+/// let mut a = ones(alloc_shape((Const::<5>, Const::<6>)));
+///
+/// // Or fill an existing array:
+/// ones(&mut a);
+/// ```
+///
+/// To allocate the output, `alloc_shape()` is required instead of `alloc()`,
+/// because `alloc()` provides no shape information
+/// and none is supplied to `build()`.
+///
+/// If shape information can be supplied to `build()`,
+/// consider using [IntoTargetWithShape] and `build_with_shape()` instead.
 pub trait IntoTarget<D: ?Sized>: IntoTargetWithShape<Self::NativeShape, D> {
     type NativeShape: Shape;
 
     fn build(self) -> Self::Target;
 }
 
+/// The inetermediate representation of output data.
+/// This generally serves two purposes:
+/// * Providing a `.view_mut()` method to which data can be written
+/// * Providing a `.output()` method to consume it and produce a return value
 pub trait OutTarget {
     type Output;
 
+    /// Consume this output target and produce its canonical return value
+    /// (e.g. `()` for [ViewMut] or [Array] for [ArrayTarget])
     fn output(self) -> Self::Output;
 }
 
 impl<
         'a,
-        S: Shape,
+        S: Shape + ShapeEq<S>,
         S2: Shape + ShapeEq<S>,
         D: 'a + ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
@@ -1011,12 +1132,16 @@ impl<
     type Target = ViewMut<'a, S, D>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        self.view_mut_shape(shape)
+        self.view_mut_with_shape(shape)
     }
 }
 
-impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>>
-    IntoTarget<D> for &'a mut Array<S, D2>
+impl<
+        'a,
+        S: Shape + ShapeEq<S>,
+        D: 'a + ?Sized,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > IntoTarget<D> for &'a mut Array<S, D2>
 {
     type NativeShape = S;
 
@@ -1025,17 +1150,17 @@ impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Ta
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoTargetWithShape<S, D>
+impl<'a, S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized> IntoTargetWithShape<S, D>
     for &'a mut ViewMut<'a, S2, D>
 {
     type Target = ViewMut<'a, S, D>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        self.view_mut_shape(shape)
+        self.view_mut_with_shape(shape)
     }
 }
 
-impl<'a, S: Shape, D: ?Sized> IntoTarget<D> for &'a mut ViewMut<'a, S, D> {
+impl<'a, S: Shape + ShapeEq<S>, D: ?Sized> IntoTarget<D> for &'a mut ViewMut<'a, S, D> {
     type NativeShape = S;
 
     fn build(self) -> Self::Target {
@@ -1065,7 +1190,10 @@ pub fn alloc_shape<S: Shape, E>(shape: S) -> AllocShape<S, E> {
 
 /// An output target wrapping an owned [Array],
 /// that when viewed has a different (but equal) shape
-/// than the underlying `Array`
+/// than the underlying `Array`.
+///
+/// This should never need to be constructed directly
+/// (see [IntoTarget])
 pub struct ArrayTarget<S: Shape, S2: Shape + ShapeEq<S>, D> {
     array: Array<S2, D>,
     shape: S,
@@ -1090,8 +1218,8 @@ impl<
     }
 }
 
-impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>> IntoView<D>
-    for ArrayTarget<S, S2, D2>
+impl<S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>>
+    IntoView<D> for ArrayTarget<S, S2, D2>
 {
     type NativeShape = S;
 
@@ -1113,7 +1241,7 @@ impl<
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > IntoViewMutWithShape<S, D> for ArrayTarget<S2, S3, D2>
 {
-    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
+    fn view_mut_with_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
         self.shape.shape_mismatch_fail(&shape);
         ViewMut {
             shape,
@@ -1125,7 +1253,7 @@ impl<
 }
 
 impl<
-        S: Shape,
+        S: Shape + ShapeEq<S>,
         S2: Shape + ShapeEq<S>,
         D: ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
@@ -1149,8 +1277,8 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, D> OutTarget for ArrayTarget<S, S2, D
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoTargetWithShape<S, [E]>
-    for AllocShape<S2, E>
+impl<'a, S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, E: Default + Clone>
+    IntoTargetWithShape<S, [E]> for AllocShape<S2, E>
 {
     type Target = ArrayTarget<S, S2, Vec<E>>;
 
@@ -1171,7 +1299,7 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoTargetWithSha
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> IntoTarget<[E]> for AllocShape<S, E> {
+impl<'a, S: Shape + ShapeEq<S>, E: Default + Clone> IntoTarget<[E]> for AllocShape<S, E> {
     type NativeShape = S;
 
     fn build(self) -> Self::Target {
@@ -1198,7 +1326,8 @@ pub fn alloc<E>() -> Alloc<E> {
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone, D: ?Sized> IntoTargetWithShape<S, D> for Alloc<E>
+impl<'a, S: Shape + ShapeEq<S>, E: Default + Clone, D: ?Sized> IntoTargetWithShape<S, D>
+    for Alloc<E>
 where
     Vec<E>: ops::DerefMut<Target = D> + ops::Deref<Target = D>,
 {
@@ -1246,7 +1375,7 @@ mod test {
 
     use crate::{
         alloc, alloc_shape, Array, AsIndex, Const, DefiniteRange, IntoTarget, IntoTargetWithShape,
-        IntoView, IntoViewMut, OutTarget, Shape, ShapeEqBase,
+        IntoView, IntoViewMut, OutTarget, Shape, ShapeEq,
     };
 
     #[test]
