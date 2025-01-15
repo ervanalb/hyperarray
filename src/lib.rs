@@ -995,13 +995,13 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 /// ```
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut ViewMut`.
-pub trait IntoTargetWithShape<S: Shape> {
-    type Target: OutTarget;
+pub trait IntoTargetWithShape<S: Shape, E, D: ?Sized> {
+    type Target: OutTarget + IntoViewMut<E, D, NativeShape = S>;
 
     fn build_shape(self, shape: S) -> Self::Target;
 }
 
-pub trait IntoTarget: IntoTargetWithShape<Self::NativeShape> {
+pub trait IntoTarget<E, D: ?Sized>: IntoTargetWithShape<Self::NativeShape, E, D> {
     type NativeShape: Shape;
 
     fn build(self) -> Self::Target;
@@ -1014,8 +1014,14 @@ pub trait OutTarget {
 }
 
 // TODO why are the reflexive bounds needed?
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: AsRef<D> + AsMut<D>> IntoTargetWithShape<S>
-    for &'a mut Array<S2, E, D>
+impl<
+        'a,
+        S: Shape,
+        S2: Shape + ShapeEq<S>,
+        E,
+        D: 'a + ?Sized + AsRef<D> + AsMut<D>,
+        D2: AsRef<D> + AsMut<D>,
+    > IntoTargetWithShape<S, E, D> for &'a mut Array<S2, E, D2>
 {
     type Target = ViewMut<'a, S, E, D>;
 
@@ -1025,7 +1031,9 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: AsRef<D> + AsMut<D>> IntoTarget
 }
 
 // TODO why are the reflexive bounds needed?
-impl<'a, S: Shape, E, D: AsRef<D> + AsMut<D>> IntoTarget for &'a mut Array<S, E, D> {
+impl<'a, S: Shape, E, D: 'a + ?Sized + AsRef<D> + AsMut<D>, D2: AsRef<D> + AsMut<D>>
+    IntoTarget<E, D> for &'a mut Array<S, E, D2>
+{
     type NativeShape = S;
 
     fn build(self) -> Self::Target {
@@ -1035,7 +1043,7 @@ impl<'a, S: Shape, E, D: AsRef<D> + AsMut<D>> IntoTarget for &'a mut Array<S, E,
 
 // TODO why are the reflexive bounds needed?
 impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized + AsRef<D> + AsMut<D>>
-    IntoTargetWithShape<S> for &'a mut ViewMut<'a, S2, E, D>
+    IntoTargetWithShape<S, E, D> for &'a mut ViewMut<'a, S2, E, D>
 {
     type Target = ViewMut<'a, S, E, D>;
 
@@ -1045,7 +1053,9 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized + AsRef<D> + AsMut<D>>
 }
 
 // TODO why are the reflexive bounds needed?
-impl<'a, S: Shape, E, D: ?Sized + AsRef<D> + AsMut<D>> IntoTarget for &'a mut ViewMut<'a, S, E, D> {
+impl<'a, S: Shape, E, D: ?Sized + AsRef<D> + AsMut<D>> IntoTarget<E, D>
+    for &'a mut ViewMut<'a, S, E, D>
+{
     type NativeShape = S;
 
     fn build(self) -> Self::Target {
@@ -1062,11 +1072,7 @@ impl<'a, S: Shape, E, D: ?Sized + AsRef<D> + AsMut<D>> OutTarget for ViewMut<'a,
     }
 }
 
-// TODO Get rid of phatom data!
-pub struct AllocShape<S: Shape, E> {
-    shape: S,
-    element: marker::PhantomData<E>,
-}
+pub struct AllocShape<S: Shape>(S);
 
 /// An output target wrapping an owned [Array],
 /// that when viewed has a different (but equal) shape
@@ -1142,9 +1148,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: AsRef<D> + AsMut<D>> In
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: AsRef<D> + AsMut<D>> OutTarget
-    for ArrayTarget<S, S2, E, D>
-{
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> OutTarget for ArrayTarget<S, S2, E, D> {
     type Output = Array<S2, E, D>;
 
     fn output(self) -> Self::Output {
@@ -1152,15 +1156,15 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: AsRef<D> + AsMut<D>> OutTarget
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoTargetWithShape<S>
-    for AllocShape<S2, E>
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone, D: ?Sized>
+    IntoTargetWithShape<S, E, D> for AllocShape<S2>
+where
+    Vec<E>: AsMut<D> + AsRef<D>,
 {
     type Target = ArrayTarget<S, S2, E, Vec<E>>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        let AllocShape {
-            shape: self_shape, ..
-        } = self;
+        let AllocShape(self_shape) = self;
         self_shape.shape_mismatch_fail(&shape);
         ArrayTarget {
             shape,
@@ -1175,11 +1179,14 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoTargetWithSha
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> IntoTarget for AllocShape<S, E> {
+impl<'a, S: Shape, E: Default + Clone, D: ?Sized> IntoTarget<E, D> for AllocShape<S>
+where
+    Vec<E>: AsMut<D> + AsRef<D>,
+{
     type NativeShape = S;
 
     fn build(self) -> Self::Target {
-        let AllocShape { shape, .. } = self;
+        let AllocShape(shape) = self;
         ArrayTarget {
             shape,
             array: Array {
@@ -1193,11 +1200,12 @@ impl<'a, S: Shape, E: Default + Clone> IntoTarget for AllocShape<S, E> {
     }
 }
 
-pub struct Alloc<E> {
-    element: marker::PhantomData<E>,
-}
+pub struct Alloc;
 
-impl<'a, S: Shape, E: Default + Clone> IntoTargetWithShape<S> for Alloc<E> {
+impl<'a, S: Shape, E: Default + Clone, D: ?Sized> IntoTargetWithShape<S, E, D> for Alloc
+where
+    Vec<E>: AsMut<D> + AsRef<D>,
+{
     type Target = Array<S, E, Vec<E>>;
 
     fn build_shape(self, shape: S) -> Self::Target {
@@ -1299,10 +1307,7 @@ mod test {
 
         fn bernstein_coef<
             V: IntoView<f32, [f32]>,
-            O: IntoTargetWithShape<
-                V::NativeShape,
-                Target: IntoViewMut<f32, [f32], NativeShape = V::NativeShape>,
-            >,
+            O: IntoTargetWithShape<V::NativeShape, f32, [f32]>,
         >(
             c_m: &V,
             out: O,
@@ -1361,19 +1366,8 @@ mod test {
         //bernstein_coef(&a, &mut b.view_mut());
         //bernstein_coef(&a.view(), &mut b);
 
-        dbg!(bernstein_coef(
-            &a,
-            Alloc {
-                element: PhantomData
-            }
-        ));
-        dbg!(bernstein_coef(
-            &a,
-            AllocShape {
-                shape: [2, 2],
-                element: PhantomData
-            }
-        ));
+        dbg!(bernstein_coef(&a, Alloc));
+        dbg!(bernstein_coef(&a, AllocShape([2, 2])));
         panic!();
 
         //bernstein_coef(&a, &mut b);
@@ -1400,9 +1394,7 @@ mod test {
 
     #[test]
     fn test_ones() {
-        fn ones<O: IntoTarget<Target: IntoViewMut<f32, [f32]>>>(
-            out: O,
-        ) -> <O::Target as OutTarget>::Output {
+        fn ones<O: IntoTarget<f32, [f32]>>(out: O) -> <O::Target as OutTarget>::Output {
             let mut target = out.build();
             let mut out_view = target.view_mut();
 
@@ -1422,9 +1414,6 @@ mod test {
         };
 
         ones(&mut a);
-        ones(AllocShape {
-            shape: [4, 4],
-            element: PhantomData,
-        });
+        ones(AllocShape([4, 4]));
     }
 }
