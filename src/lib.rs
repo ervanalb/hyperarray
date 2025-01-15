@@ -3,9 +3,6 @@ use std::fmt;
 use std::marker;
 use std::ops;
 
-// TODO: FromDim and FromShape don't make sense!
-// They should be replaced with
-
 /// Represents the dimension of one axis of multi-dimensional data.
 /// These types may represent a constant known at compile-time (e.g. `Const<3>`)
 /// or runtime (e.g. `usize`),
@@ -484,7 +481,7 @@ pub struct Array<S: Shape, E, D> {
 /// For a mutable reference, see [ViewMut],
 /// or for owned data, see [Array].
 #[derive(Debug)]
-pub struct View<'a, S: Shape, E, D> {
+pub struct View<'a, S: Shape, E, D: ?Sized> {
     shape: S,
     element: marker::PhantomData<E>,
     offset: usize,
@@ -498,7 +495,7 @@ pub struct View<'a, S: Shape, E, D> {
 /// For an immutable reference, see [View],
 /// or for owned data, see [Array].
 #[derive(Debug)]
-pub struct ViewMut<'a, S: Shape, E, D> {
+pub struct ViewMut<'a, S: Shape, E, D: ?Sized> {
     shape: S,
     element: marker::PhantomData<E>,
     offset: usize,
@@ -522,106 +519,100 @@ pub struct ViewMut<'a, S: Shape, E, D> {
 /// ```
 ///
 /// This `sum` function can now accept `&Array`, `&View`, or `&ViewMut`.
-pub trait IntoView {
-    type Shape: Shape;
-    type Element;
-    type Data;
 
-    /// Infalliable view using the native Shape
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data>;
-
-    /// Attempt to view with the given shape type, panicking if the given shape type is not compatible
-    fn view_with_shape<S: Shape>(&self, shape: S) -> View<S, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S>;
+pub trait IntoView<S: Shape, E, D: ?Sized> {
+    fn view_shape(&self, shape: S) -> View<S, E, D>;
 }
 
-impl<S: Shape, E, D> IntoView for Array<S, E, D> {
-    type Shape = S;
-    type Element = E;
-    type Data = D;
+pub trait IntoSizedView<E, D: ?Sized>: IntoView<Self::NativeShape, E, D> {
+    type NativeShape: Shape;
 
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
-        View {
-            shape: self.shape.clone(),
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides.clone(),
-            data: &self.data,
-        }
-    }
+    fn view(&self) -> View<Self::NativeShape, E, D>;
+}
 
-    fn view_with_shape<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S2>,
-    {
+impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: AsRef<D>> IntoView<S, E, D>
+    for Array<S2, E, D2>
+{
+    fn view_shape(&self, shape: S) -> View<S, E, D> {
         self.shape.shape_mismatch_fail(&shape);
         View {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
-            data: &self.data,
+            strides: self.strides.into_index_fail(),
+            data: self.data.as_ref(),
         }
     }
 }
 
-impl<S: Shape, E, D> IntoView for View<'_, S, E, D> {
-    type Shape = S;
-    type Element = E;
-    type Data = D;
+impl<S: Shape, E, D: ?Sized, D2: AsRef<D>> IntoSizedView<E, D> for Array<S, E, D2> {
+    type NativeShape = S;
 
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+    fn view(&self) -> View<S, E, D> {
         View {
             shape: self.shape.clone(),
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.clone(),
-            data: self.data,
+            data: self.data.as_ref(),
         }
     }
+}
 
-    fn view_with_shape<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S2>,
-    {
+impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: ?Sized + AsRef<D>> IntoView<S, E, D>
+    for View<'_, S2, E, D2>
+{
+    fn view_shape(&self, shape: S) -> View<S, E, D> {
         self.shape.shape_mismatch_fail(&shape);
         View {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
-            data: self.data,
+            strides: self.strides.into_index_fail(),
+            data: self.data.as_ref(),
         }
     }
 }
 
-impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
-    type Shape = S;
-    type Element = E;
-    type Data = D;
+impl<S: Shape, E, D: ?Sized, D2: ?Sized + AsRef<D>> IntoSizedView<E, D> for View<'_, S, E, D2> {
+    type NativeShape = S;
 
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
+    fn view(&self) -> View<S, E, D> {
         View {
             shape: self.shape.clone(),
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.clone(),
-            data: self.data,
+            data: self.data.as_ref(),
         }
     }
+}
 
-    fn view_with_shape<S2: Shape>(&self, shape: S2) -> View<S2, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S2>,
-    {
+impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: ?Sized + AsRef<D>> IntoView<S, E, D>
+    for ViewMut<'_, S2, E, D2>
+{
+    fn view_shape(&self, shape: S) -> View<S, E, D> {
         self.shape.shape_mismatch_fail(&shape);
         View {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
-            data: self.data,
+            strides: self.strides.into_index_fail(),
+            data: self.data.as_ref(),
+        }
+    }
+}
+
+impl<S: Shape, E, D: ?Sized, D2: ?Sized + AsRef<D>> IntoSizedView<E, D> for ViewMut<'_, S, E, D2> {
+    type NativeShape = S;
+
+    fn view(&self) -> View<S, E, D> {
+        View {
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.offset,
+            strides: self.strides.clone(),
+            data: self.data.as_ref(),
         }
     }
 }
@@ -643,71 +634,68 @@ impl<S: Shape, E, D> IntoView for ViewMut<'_, S, E, D> {
 /// ```
 ///
 /// This `increment` function can now accept `&mut Array` or `&mut View`.
-pub trait IntoViewMut: IntoView {
-    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data>;
-
-    fn view_mut_with_shape<S: Shape>(
-        &mut self,
-        shape: S,
-    ) -> ViewMut<'_, S, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S>;
+pub trait IntoViewMut<S: Shape, E, D: ?Sized>: IntoView<S, E, D> {
+    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, E, D>;
 }
 
-impl<S: Shape, E, D> IntoViewMut for Array<S, E, D> {
-    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
-        ViewMut {
-            shape: self.shape.clone(),
-            element: marker::PhantomData,
-            offset: self.offset,
-            strides: self.strides.clone(), // Shouldn't fail if shapes match
-            data: &mut self.data,
-        }
-    }
+pub trait IntoSizedViewMut<E, D: ?Sized>:
+    IntoSizedView<E, D> + IntoViewMut<Self::NativeShape, E, D>
+{
+    fn view_mut(&mut self) -> ViewMut<Self::NativeShape, E, D>;
+}
 
-    fn view_mut_with_shape<S2: Shape>(
-        &mut self,
-        shape: S2,
-    ) -> ViewMut<'_, S2, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S2>,
-    {
+impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: AsRef<D> + AsMut<D>> IntoViewMut<S, E, D>
+    for Array<S2, E, D2>
+{
+    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, E, D> {
         self.shape.shape_mismatch_fail(&shape);
         ViewMut {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
-            data: &mut self.data,
+            data: self.data.as_mut(),
         }
     }
 }
 
-impl<S: Shape, E, D> IntoViewMut for ViewMut<'_, S, E, D> {
-    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
+impl<S: Shape, E, D: ?Sized, D2: AsRef<D> + AsMut<D>> IntoSizedViewMut<E, D> for Array<S, E, D2> {
+    fn view_mut(&mut self) -> ViewMut<'_, S, E, D> {
         ViewMut {
             shape: self.shape.clone(),
             element: marker::PhantomData,
             offset: self.offset,
-            strides: self.strides.clone(), // Shouldn't fail if shapes match
-            data: self.data,
+            strides: self.strides.clone(),
+            data: self.data.as_mut(),
         }
     }
+}
 
-    fn view_mut_with_shape<S2: Shape>(
-        &mut self,
-        shape: S2,
-    ) -> ViewMut<'_, S2, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S2>,
-    {
+impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: ?Sized + AsRef<D> + AsMut<D>>
+    IntoViewMut<S, E, D> for ViewMut<'_, S2, E, D2>
+{
+    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, E, D> {
         self.shape.shape_mismatch_fail(&shape);
         ViewMut {
             shape,
             element: marker::PhantomData,
             offset: self.offset,
             strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
-            data: self.data,
+            data: self.data.as_mut(),
+        }
+    }
+}
+
+impl<S: Shape, E, D: ?Sized, D2: ?Sized + AsRef<D> + AsMut<D>> IntoSizedViewMut<E, D>
+    for ViewMut<'_, S, E, D2>
+{
+    fn view_mut(&mut self) -> ViewMut<'_, S, E, D> {
+        ViewMut {
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.offset,
+            strides: self.strides.clone(),
+            data: self.data.as_mut(),
         }
     }
 }
@@ -884,66 +872,69 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 /// }
 /// ```
 ///
-/// This `increment` function can now accept `&mut Array` or `&mut View`.
-pub trait IntoArbTarget<S: Shape, E> {
-    type Data;
-    type Output;
-    type Target: OutTarget<Shape = S, Element = E, Data = Self::Data, Output = Self::Output>;
+/// This `increment` function can now accept `&mut Array` or `&mut ViewMut`.
+pub trait IntoTarget<S: Shape> {
+    type Target: OutTarget;
 
     fn build_shape(self, shape: S) -> Self::Target;
 }
 
-pub trait IntoTarget<E>: IntoArbTarget<Self::Shape, E> {
-    type Shape: Shape;
+pub trait IntoSizedTarget: IntoTarget<Self::NativeShape> {
+    type NativeShape: Shape;
 
     fn build(self) -> Self::Target;
 }
 
-pub trait OutTarget: IntoViewMut {
+pub trait OutTarget {
     type Output;
 
     fn output(self) -> Self::Output;
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoArbTarget<S, E> for &'a mut Array<S2, E, D> {
-    type Data = D;
-    type Output = ();
+// TODO why are the reflexive bounds needed?
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: AsRef<D> + AsMut<D>> IntoTarget<S>
+    for &'a mut Array<S2, E, D>
+{
     type Target = ViewMut<'a, S, E, D>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        self.view_mut_with_shape(shape)
+        self.view_mut_shape(shape)
     }
 }
 
-impl<'a, S: Shape, E, D> IntoTarget<E> for &'a mut Array<S, E, D> {
-    type Shape = S;
+// TODO why are the reflexive bounds needed?
+impl<'a, S: Shape, E, D: AsRef<D> + AsMut<D>> IntoSizedTarget for &'a mut Array<S, E, D> {
+    type NativeShape = S;
 
     fn build(self) -> Self::Target {
         self.view_mut()
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D> IntoArbTarget<S, E>
+// TODO why are the reflexive bounds needed?
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized + AsRef<D> + AsMut<D>> IntoTarget<S>
     for &'a mut ViewMut<'a, S2, E, D>
 {
-    type Data = D;
-    type Output = ();
     type Target = ViewMut<'a, S, E, D>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        self.view_mut_with_shape(shape)
+        self.view_mut_shape(shape)
     }
 }
 
-impl<'a, S: Shape, E, D> IntoTarget<E> for &'a mut ViewMut<'a, S, E, D> {
-    type Shape = S;
+// TODO why are the reflexive bounds needed?
+impl<'a, S: Shape, E, D: ?Sized + AsRef<D> + AsMut<D>> IntoSizedTarget
+    for &'a mut ViewMut<'a, S, E, D>
+{
+    type NativeShape = S;
 
     fn build(self) -> Self::Target {
         self.view_mut()
     }
 }
 
-impl<'a, S: Shape, E, D> OutTarget for ViewMut<'a, S, E, D> {
+// TODO why are the reflexive bounds needed?
+impl<'a, S: Shape, E, D: ?Sized + AsRef<D> + AsMut<D>> OutTarget for ViewMut<'a, S, E, D> {
     type Output = ();
 
     fn output(self) -> Self::Output {
@@ -951,94 +942,103 @@ impl<'a, S: Shape, E, D> OutTarget for ViewMut<'a, S, E, D> {
     }
 }
 
-pub struct AllocShape<S: Shape>(S);
+// TODO Get rid of phatom data!
+pub struct AllocShape<S: Shape, E> {
+    shape: S,
+    element: marker::PhantomData<E>,
+}
 
 /// An output target wrapping an owned [Array],
 /// that when viewed has a different (but equal) shape
 /// than the underlying `Array`
-pub struct ArrayTarget<S: Shape, S2: Shape + ShapeEq<S>, E> {
-    array: Array<S2, E, Vec<E>>,
+pub struct ArrayTarget<S: Shape, S2: Shape + ShapeEq<S>, E, D> {
+    array: Array<S2, E, D>,
     shape: S,
 }
 
-impl<S: Shape, S2: Shape + ShapeEq<S>, E> IntoView for ArrayTarget<S, S2, E> {
-    type Shape = S;
-    type Element = E;
-    type Data = Vec<E>;
-
-    fn view(&self) -> View<Self::Shape, Self::Element, Self::Data> {
-        View {
-            shape: self.shape.clone(),
-            element: marker::PhantomData,
-            offset: self.array.offset,
-            strides: self.array.strides.into_index_fail(),
-            data: &self.array.data,
-        }
-    }
-
-    fn view_with_shape<S3: Shape>(&self, shape: S3) -> View<S3, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S3>,
-    {
+impl<S: Shape, S2: Shape + ShapeEq<S>, S3: Shape + ShapeEq<S2>, E, D: ?Sized, D2: AsRef<D>>
+    IntoView<S, E, D> for ArrayTarget<S2, S3, E, D2>
+{
+    fn view_shape(&self, shape: S) -> View<S, E, D> {
         self.shape.shape_mismatch_fail(&shape);
         View {
             shape,
             element: marker::PhantomData,
             offset: self.array.offset,
-            strides: self.array.strides.into_index_fail().into_index_fail(), // Shouldn't fail if
-            // shapes match
-            data: &self.array.data,
+            strides: self.array.strides.into_index_fail().into_index_fail(),
+            data: self.array.data.as_ref(),
         }
     }
 }
 
-impl<S: Shape, S2: Shape + ShapeEq<S>, E> IntoViewMut for ArrayTarget<S, S2, E> {
-    fn view_mut(&mut self) -> ViewMut<'_, Self::Shape, Self::Element, Self::Data> {
-        ViewMut {
+impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: AsRef<D>> IntoSizedView<E, D>
+    for ArrayTarget<S, S2, E, D2>
+{
+    type NativeShape = S;
+
+    fn view(&self) -> View<S, E, D> {
+        View {
             shape: self.shape.clone(),
             element: marker::PhantomData,
             offset: self.array.offset,
             strides: self.array.strides.into_index_fail(),
-            data: &mut self.array.data,
+            data: self.array.data.as_ref(),
         }
     }
+}
 
-    fn view_mut_with_shape<S3: Shape>(
-        &mut self,
-        shape: S3,
-    ) -> ViewMut<'_, S3, Self::Element, Self::Data>
-    where
-        Self::Shape: ShapeEq<S3>,
-    {
+impl<
+        S: Shape,
+        S2: Shape + ShapeEq<S>,
+        S3: Shape + ShapeEq<S2>,
+        E,
+        D: ?Sized,
+        D2: AsRef<D> + AsMut<D>,
+    > IntoViewMut<S, E, D> for ArrayTarget<S2, S3, E, D2>
+{
+    fn view_mut_shape(&mut self, shape: S) -> ViewMut<'_, S, E, D> {
         self.shape.shape_mismatch_fail(&shape);
         ViewMut {
             shape,
             element: marker::PhantomData,
             offset: self.array.offset,
-            strides: self.array.strides.into_index_fail().into_index_fail(), // Shouldn't fail if
-            // shapes match
-            data: &mut self.array.data,
+            strides: self.array.strides.into_index_fail().into_index_fail(),
+            data: self.array.data.as_mut(),
         }
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E> OutTarget for ArrayTarget<S, S2, E> {
-    type Output = Array<S2, E, Vec<E>>;
+impl<S: Shape, S2: Shape + ShapeEq<S>, E, D: ?Sized, D2: AsRef<D> + AsMut<D>> IntoSizedViewMut<E, D>
+    for ArrayTarget<S, S2, E, D2>
+{
+    fn view_mut(&mut self) -> ViewMut<'_, S, E, D> {
+        ViewMut {
+            shape: self.shape.clone(),
+            element: marker::PhantomData,
+            offset: self.array.offset,
+            strides: self.array.strides.into_index_fail(),
+            data: self.array.data.as_mut(),
+        }
+    }
+}
+
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E, D: AsRef<D> + AsMut<D>> OutTarget
+    for ArrayTarget<S, S2, E, D>
+{
+    type Output = Array<S2, E, D>;
 
     fn output(self) -> Self::Output {
         self.array
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoArbTarget<S, E>
-    for AllocShape<S2>
-{
-    type Data = Vec<E>;
-    type Output = Array<S2, E, Self::Data>;
-    type Target = ArrayTarget<S, S2, E>;
+impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoTarget<S> for AllocShape<S2, E> {
+    type Target = ArrayTarget<S, S2, E, Vec<E>>;
 
     fn build_shape(self, shape: S) -> Self::Target {
-        let AllocShape(self_shape) = self;
+        let AllocShape {
+            shape: self_shape, ..
+        } = self;
         self_shape.shape_mismatch_fail(&shape);
         ArrayTarget {
             shape,
@@ -1053,11 +1053,11 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, E: Default + Clone> IntoArbTarget<S, 
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> IntoTarget<E> for AllocShape<S> {
-    type Shape = S;
+impl<'a, S: Shape, E: Default + Clone> IntoSizedTarget for AllocShape<S, E> {
+    type NativeShape = S;
 
     fn build(self) -> Self::Target {
-        let AllocShape(shape) = self;
+        let AllocShape { shape, .. } = self;
         ArrayTarget {
             shape,
             array: Array {
@@ -1071,12 +1071,12 @@ impl<'a, S: Shape, E: Default + Clone> IntoTarget<E> for AllocShape<S> {
     }
 }
 
-pub struct Alloc;
+pub struct Alloc<E> {
+    element: marker::PhantomData<E>,
+}
 
-impl<'a, S: Shape, E: Default + Clone> IntoArbTarget<S, E> for Alloc {
-    type Data = Vec<E>;
-    type Output = Self::Target;
-    type Target = Array<S, E, Self::Data>;
+impl<'a, S: Shape, E: Default + Clone> IntoTarget<S> for Alloc<E> {
+    type Target = Array<S, E, Vec<E>>;
 
     fn build_shape(self, shape: S) -> Self::Target {
         Array {
@@ -1088,28 +1088,6 @@ impl<'a, S: Shape, E: Default + Clone> IntoArbTarget<S, E> for Alloc {
         }
     }
 }
-
-/*
-pub struct Alloc;
-
-impl<'a, S: Shape, E: Default + Clone> IntoKnownSizeTarget<S, E> for Alloc {
-    type Data = Vec<E>;
-
-    type Target = Array<S, E, Self::Data>;
-    type Output = Self::Target;
-
-    fn build(self) -> Self::Target {
-        let AllocShape(shape) = self;
-        Array {
-            shape,
-            strides: shape.default_strides(),
-            element: marker::PhantomData,
-            offset: 0,
-            data: vec![E::default(); shape.num_elements()],
-        }
-    }
-}
-*/
 
 impl<S: Shape, E, D> OutTarget for Array<S, E, D> {
     type Output = Self;
@@ -1142,8 +1120,8 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        Alloc, AllocShape, Array, AsIndex, Const, DefiniteRange, IntoArbTarget, IntoTarget,
-        IntoView, IntoViewMut, OutTarget, Shape, ShapeEqBase,
+        Alloc, AllocShape, Array, AsIndex, Const, DefiniteRange, IntoSizedTarget, IntoSizedView,
+        IntoSizedViewMut, IntoTarget, OutTarget, Shape, ShapeEqBase,
     };
     use std::marker::PhantomData;
 
@@ -1198,8 +1176,8 @@ mod test {
         }
 
         fn bernstein_coef<
-            V: IntoView<Element = f32, Data: AsRef<[f32]>>,
-            O: IntoArbTarget<V::Shape, f32, Data: AsRef<[f32]> + AsMut<[f32]>>,
+            V: IntoSizedView<f32, [f32]>,
+            O: IntoTarget<V::NativeShape, Target: IntoSizedViewMut<f32, [f32]>>,
         >(
             c_m: &V,
             out: O,
@@ -1258,8 +1236,19 @@ mod test {
         //bernstein_coef(&a, &mut b.view_mut());
         //bernstein_coef(&a.view(), &mut b);
 
-        dbg!(bernstein_coef(&a, Alloc));
-        dbg!(bernstein_coef(&a, AllocShape([2, 2])));
+        dbg!(bernstein_coef(
+            &a,
+            Alloc {
+                element: PhantomData
+            }
+        ));
+        dbg!(bernstein_coef(
+            &a,
+            AllocShape {
+                shape: [2, 2],
+                element: PhantomData
+            }
+        ));
         panic!();
 
         //bernstein_coef(&a, &mut b);
@@ -1267,7 +1256,7 @@ mod test {
 
     #[test]
     fn test_sum() {
-        fn sum(in1: &impl IntoView<Element = f32, Data: AsRef<[f32]>>) -> f32 {
+        fn sum(in1: &impl IntoSizedView<f32, [f32]>) -> f32 {
             let in1 = in1.view();
 
             in1.into_iter().sum()
@@ -1286,7 +1275,9 @@ mod test {
 
     #[test]
     fn test_ones() {
-        fn ones<O: IntoTarget<f32, Data: AsRef<[f32]> + AsMut<[f32]>>>(out: O) -> O::Output {
+        fn ones<O: IntoSizedTarget<Target: IntoSizedViewMut<f32, [f32]>>>(
+            out: O,
+        ) -> <O::Target as OutTarget>::Output {
             let mut target = out.build();
             let mut out_view = target.view_mut();
 
@@ -1306,6 +1297,9 @@ mod test {
         };
 
         ones(&mut a);
-        ones(AllocShape([4, 4]));
+        ones(AllocShape {
+            shape: [4, 4],
+            element: PhantomData,
+        });
     }
 }
