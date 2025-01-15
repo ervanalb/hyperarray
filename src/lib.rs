@@ -702,6 +702,7 @@ impl<S: Shape, E, D: ?Sized, D2: ?Sized + AsRef<D> + AsMut<D>> IntoSizedViewMut<
 
 /////////////////////////////////////////////
 
+/*
 macro_rules! impl_view_methods {
     ($struct:ident $(<$lt:lifetime>)?) => {
         impl<S: Shape, E, D: AsRef<[E]>> $struct<$($lt,)? S, E, D> {
@@ -765,13 +766,134 @@ macro_rules! impl_view_mut_methods {
         }
     };
 }
+*/
+impl<S: Shape, E> View<'_, S, E, [E]> {
+    pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
+        self.data
+            .get_unchecked(self.offset + idx.to_i(&self.strides))
+    }
+}
 
-impl_view_methods!(View<'_>);
-impl_view_methods!(ViewMut<'_>);
-impl_view_methods!(Array);
+impl<S: Shape, E> ops::Index<S::Index> for View<'_, S, E, [E]> {
+    type Output = E;
+    fn index(&self, idx: S::Index) -> &E {
+        self.shape.out_of_bounds_fail(&idx);
+        unsafe { self.get_unchecked(idx) }
+    }
+}
+impl<'a, S: Shape, E> IntoIterator for &'a View<'_, S, E, [E]> {
+    type Item = &'a E;
+    type IntoIter = NdIter<'a, S, E>;
+    fn into_iter(self) -> Self::IntoIter {
+        NdIter {
+            shape: self.shape.clone(),
+            strides: self.strides,
+            data: &self.data[self.offset..],
+            idx: (..self.shape).first(),
+        }
+    }
+}
+impl<S: Shape, E> ViewMut<'_, S, E, [E]> {
+    pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
+        self.data
+            .get_unchecked(self.offset + idx.to_i(&self.strides))
+    }
+}
+impl<S: Shape, E> ops::Index<S::Index> for ViewMut<'_, S, E, [E]> {
+    type Output = E;
+    fn index(&self, idx: S::Index) -> &E {
+        self.shape.out_of_bounds_fail(&idx);
+        unsafe { self.get_unchecked(idx) }
+    }
+}
+impl<'a, S: Shape, E> IntoIterator for &'a ViewMut<'_, S, E, [E]> {
+    type Item = &'a E;
+    type IntoIter = NdIter<'a, S, E>;
+    fn into_iter(self) -> Self::IntoIter {
+        NdIter {
+            shape: self.shape.clone(),
+            strides: self.strides,
+            data: &self.data[self.offset..],
+            idx: (..self.shape).first(),
+        }
+    }
+}
+impl<S: Shape, E, D: AsRef<[E]>> Array<S, E, D> {
+    pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
+        self.data
+            .as_ref()
+            .get_unchecked(self.offset + idx.to_i(&self.strides))
+    }
+}
+impl<S: Shape, E, D: AsRef<[E]>> ops::Index<S::Index> for Array<S, E, D> {
+    type Output = E;
+    fn index(&self, idx: S::Index) -> &E {
+        self.shape.out_of_bounds_fail(&idx);
+        unsafe { self.get_unchecked(idx) }
+    }
+}
+impl<'a, S: Shape, E, D: AsRef<[E]>> IntoIterator for &'a Array<S, E, D> {
+    type Item = &'a E;
+    type IntoIter = NdIter<'a, S, E>;
+    fn into_iter(self) -> Self::IntoIter {
+        NdIter {
+            shape: self.shape.clone(),
+            strides: self.strides,
+            data: &self.data.as_ref()[self.offset..],
+            idx: (..self.shape).first(),
+        }
+    }
+}
 
-impl_view_mut_methods!(ViewMut<'_>);
-impl_view_mut_methods!(Array);
+impl<S: Shape, E> ViewMut<'_, S, E, [E]> {
+    pub unsafe fn get_unchecked_mut(&mut self, idx: S::Index) -> &mut E {
+        self.data
+            .get_unchecked_mut(self.offset + idx.to_i(&self.strides))
+    }
+}
+impl<S: Shape, E> ops::IndexMut<S::Index> for ViewMut<'_, S, E, [E]> {
+    fn index_mut(&mut self, idx: S::Index) -> &mut E {
+        self.shape.out_of_bounds_fail(&idx);
+        unsafe { self.get_unchecked_mut(idx) }
+    }
+}
+impl<'a, S: Shape, E> IntoIterator for &'a mut ViewMut<'_, S, E, [E]> {
+    type Item = &'a mut E;
+    type IntoIter = NdIterMut<'a, S, E>;
+    fn into_iter(self) -> Self::IntoIter {
+        NdIterMut {
+            shape: self.shape.clone(),
+            strides: self.strides,
+            data: &mut self.data[self.offset..],
+            idx: (..self.shape).first(),
+        }
+    }
+}
+impl<S: Shape, E, D: AsRef<[E]> + AsMut<[E]>> Array<S, E, D> {
+    pub unsafe fn get_unchecked_mut(&mut self, idx: S::Index) -> &mut E {
+        self.data
+            .as_mut()
+            .get_unchecked_mut(self.offset + idx.to_i(&self.strides))
+    }
+}
+impl<S: Shape, E, D: AsRef<[E]> + AsMut<[E]>> ops::IndexMut<S::Index> for Array<S, E, D> {
+    fn index_mut(&mut self, idx: S::Index) -> &mut E {
+        self.shape.out_of_bounds_fail(&idx);
+        unsafe { self.get_unchecked_mut(idx) }
+    }
+}
+impl<'a, S: Shape, E, D: AsMut<[E]>> IntoIterator for &'a mut Array<S, E, D> {
+    type Item = &'a mut E;
+    type IntoIter = NdIterMut<'a, S, E>;
+    fn into_iter(self) -> Self::IntoIter {
+        NdIterMut {
+            shape: self.shape.clone(),
+            strides: self.strides,
+            data: &mut self.data.as_mut()[self.offset..],
+            idx: (..self.shape).first(),
+        }
+    }
+}
 
 /////////////////////////////////////////////
 
@@ -1146,7 +1268,7 @@ mod test {
     }
 
     #[test]
-    fn test() {
+    fn test_iter() {
         let mut t = Array {
             shape: (Const::<2>, Const::<2>),
             strides: (Const::<2>, Const::<2>).default_strides(),
@@ -1177,7 +1299,10 @@ mod test {
 
         fn bernstein_coef<
             V: IntoSizedView<f32, [f32]>,
-            O: IntoTarget<V::NativeShape, Target: IntoSizedViewMut<f32, [f32]>>,
+            O: IntoTarget<
+                V::NativeShape,
+                Target: IntoSizedViewMut<f32, [f32], NativeShape = V::NativeShape>,
+            >,
         >(
             c_m: &V,
             out: O,
