@@ -11,7 +11,7 @@ pub trait Dim: 'static + Sized + Clone + Copy + fmt::Debug + Into<usize> + Parti
 
 /// Represents an axis of unit length that can be broadcast to any size.
 #[derive(Default, Clone, Copy)]
-struct NewAxis;
+pub struct NewAxis;
 
 impl fmt::Debug for NewAxis {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -61,91 +61,91 @@ impl<const N: usize> cmp::PartialEq<Const<N>> for Const<N> {
     }
 }
 
-pub trait BroadcastDim<T> {
+pub trait Broadcast<T> {
     type Output;
 
-    fn broadcast_dim(self, other: T) -> Option<Self::Output>;
+    fn broadcast(self, other: T) -> Option<Self::Output>;
 }
 
 // Marker trait for if this broadcast avoids aliasing
-pub trait BroadcastDimNoAlias<T>: BroadcastDim<T> {}
+pub trait BroadcastNoAlias<T>: Broadcast<T> {}
 
-impl<const N: usize> BroadcastDim<Const<N>> for Const<N> {
+impl<const N: usize> Broadcast<Const<N>> for Const<N> {
     type Output = Const<N>;
 
-    fn broadcast_dim(self, _other: Const<N>) -> Option<Self::Output> {
+    fn broadcast(self, _other: Const<N>) -> Option<Self::Output> {
         Some(Const::<N>)
     }
 }
-impl<const N: usize> BroadcastDimNoAlias<Const<N>> for Const<N> {}
+impl<const N: usize> BroadcastNoAlias<Const<N>> for Const<N> {}
 
-impl<const N: usize> BroadcastDim<Const<N>> for usize {
+impl<const N: usize> Broadcast<Const<N>> for usize {
     type Output = Const<N>;
 
-    fn broadcast_dim(self, other: Const<N>) -> Option<Self::Output> {
+    fn broadcast(self, other: Const<N>) -> Option<Self::Output> {
         (self != other).then_some(Const)
     }
 }
-impl<const N: usize> BroadcastDimNoAlias<Const<N>> for usize {}
+impl<const N: usize> BroadcastNoAlias<Const<N>> for usize {}
 
-impl<const N: usize> BroadcastDim<Const<N>> for NewAxis {
+impl<const N: usize> Broadcast<Const<N>> for NewAxis {
     type Output = Const<N>;
 
-    fn broadcast_dim(self, _other: Const<N>) -> Option<Self::Output> {
+    fn broadcast(self, _other: Const<N>) -> Option<Self::Output> {
         Some(Const)
     }
 }
 
-impl<const N: usize> BroadcastDim<usize> for Const<N> {
+impl<const N: usize> Broadcast<usize> for Const<N> {
     type Output = Const<N>;
 
-    fn broadcast_dim(self, other: usize) -> Option<Self::Output> {
+    fn broadcast(self, other: usize) -> Option<Self::Output> {
         (self != other).then_some(Const)
     }
 }
-impl<const N: usize> BroadcastDimNoAlias<usize> for Const<N> {}
+impl<const N: usize> BroadcastNoAlias<usize> for Const<N> {}
 
-impl BroadcastDim<usize> for usize {
+impl Broadcast<usize> for usize {
     type Output = usize;
 
-    fn broadcast_dim(self, other: usize) -> Option<Self::Output> {
+    fn broadcast(self, other: usize) -> Option<Self::Output> {
         (self != other).then_some(self)
     }
 }
-impl BroadcastDimNoAlias<usize> for usize {}
+impl BroadcastNoAlias<usize> for usize {}
 
-impl BroadcastDim<usize> for NewAxis {
+impl Broadcast<usize> for NewAxis {
     type Output = usize;
 
-    fn broadcast_dim(self, other: usize) -> Option<Self::Output> {
+    fn broadcast(self, other: usize) -> Option<Self::Output> {
         Some(other)
     }
 }
 
-impl<const N: usize> BroadcastDim<NewAxis> for Const<N> {
+impl<const N: usize> Broadcast<NewAxis> for Const<N> {
     type Output = Const<N>;
 
-    fn broadcast_dim(self, _other: NewAxis) -> Option<Self::Output> {
+    fn broadcast(self, _other: NewAxis) -> Option<Self::Output> {
         Some(Const)
     }
 }
 
-impl BroadcastDim<NewAxis> for usize {
+impl Broadcast<NewAxis> for usize {
     type Output = usize;
 
-    fn broadcast_dim(self, _other: NewAxis) -> Option<Self::Output> {
+    fn broadcast(self, _other: NewAxis) -> Option<Self::Output> {
         Some(self)
     }
 }
 
-impl BroadcastDim<NewAxis> for NewAxis {
+impl Broadcast<NewAxis> for NewAxis {
     type Output = NewAxis;
 
-    fn broadcast_dim(self, _other: NewAxis) -> Option<Self::Output> {
+    fn broadcast(self, _other: NewAxis) -> Option<Self::Output> {
         Some(NewAxis)
     }
 }
-impl BroadcastDimNoAlias<NewAxis> for NewAxis {}
+impl BroadcastNoAlias<NewAxis> for NewAxis {}
 
 /// A trait indicating that a type can be viewed as an [Index].
 ///
@@ -477,6 +477,15 @@ impl ShapeEq<()> for () {
     }
 }
 
+impl Broadcast<()> for () {
+    type Output = ();
+
+    fn broadcast(self, _other: ()) -> Option<()> {
+        Some(())
+    }
+}
+impl BroadcastNoAlias<()> for () {}
+
 // 1 axis
 
 impl<D1: Dim> AsIndex for (D1,) {
@@ -494,6 +503,35 @@ impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEq<(E1,)> for (D1,) {
         self.0 == other.0
     }
 }
+
+impl<D1: Broadcast<NewAxis>> Broadcast<()> for (D1,) {
+    type Output = (D1::Output,);
+
+    fn broadcast(self, _other: ()) -> Option<Self::Output> {
+        Some((self.0.broadcast(NewAxis)?,))
+    }
+}
+impl<D1: BroadcastNoAlias<NewAxis>> BroadcastNoAlias<()> for (D1,) {}
+
+impl<E1> Broadcast<(E1,)> for ()
+where
+    NewAxis: Broadcast<E1>,
+{
+    type Output = (<NewAxis as Broadcast<E1>>::Output,);
+
+    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+        Some((NewAxis.broadcast(other.0)?,))
+    }
+}
+impl<E1> BroadcastNoAlias<(E1,)> for () where NewAxis: BroadcastNoAlias<E1> {}
+
+impl<D1: Broadcast<E1>, E1> Broadcast<(E1,)> for (D1,) {
+    type Output = (<D1 as Broadcast<E1>>::Output,);
+    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+        Some((self.0.broadcast(other.0)?,))
+    }
+}
+impl<D1: BroadcastNoAlias<E1>, E1> BroadcastNoAlias<(E1,)> for (D1,) {}
 
 // 2 axes
 
@@ -529,6 +567,78 @@ impl<D1: Dim + PartialEq<E1>, E1: Dim> ShapeEq<(E1, NewAxis)> for (D1, NewAxis) 
     fn shape_eq(&self, other: &(E1, NewAxis)) -> bool {
         self.0 == other.0
     }
+}
+
+impl<D1: Broadcast<NewAxis>, D2: Broadcast<NewAxis>> Broadcast<()> for (D1, D2) {
+    type Output = (D1::Output, D2::Output);
+
+    fn broadcast(self, _other: ()) -> Option<Self::Output> {
+        Some((self.0.broadcast(NewAxis)?, self.1.broadcast(NewAxis)?))
+    }
+}
+impl<D1: BroadcastNoAlias<NewAxis>, D2: BroadcastNoAlias<NewAxis>> BroadcastNoAlias<()>
+    for (D1, D2)
+{
+}
+
+impl<E1, E2> Broadcast<(E1, E2)> for ()
+where
+    NewAxis: Broadcast<E1>,
+    NewAxis: Broadcast<E2>,
+{
+    type Output = (
+        <NewAxis as Broadcast<E1>>::Output,
+        <NewAxis as Broadcast<E2>>::Output,
+    );
+
+    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+        Some((NewAxis.broadcast(other.0)?, NewAxis.broadcast(other.1)?))
+    }
+}
+impl<E1, E2> BroadcastNoAlias<(E1, E2)> for ()
+where
+    NewAxis: BroadcastNoAlias<E1>,
+    NewAxis: BroadcastNoAlias<E2>,
+{
+}
+
+impl<D1: Broadcast<NewAxis>, D2: Broadcast<E1>, E1> Broadcast<(E1,)> for (D1, D2) {
+    type Output = (D1::Output, D2::Output);
+
+    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+        Some((self.0.broadcast(NewAxis)?, self.1.broadcast(other.0)?))
+    }
+}
+impl<D1: BroadcastNoAlias<NewAxis>, D2: BroadcastNoAlias<E1>, E1> BroadcastNoAlias<(E1,)>
+    for (D1, D2)
+{
+}
+
+impl<D1: Broadcast<E2>, E1, E2> Broadcast<(E1, E2)> for (D1,)
+where
+    NewAxis: Broadcast<E1>,
+{
+    type Output = (<NewAxis as Broadcast<E1>>::Output, D1::Output);
+
+    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+        Some((NewAxis.broadcast(other.0)?, self.0.broadcast(other.1)?))
+    }
+}
+impl<D1: BroadcastNoAlias<E2>, E1, E2> BroadcastNoAlias<(E1, E2)> for (D1,) where
+    NewAxis: BroadcastNoAlias<E1>
+{
+}
+
+impl<D1: Broadcast<E1>, D2: Broadcast<E2>, E1, E2> Broadcast<(E1, E2)> for (D1, D2) {
+    type Output = (D1::Output, D2::Output);
+
+    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+        Some((self.0.broadcast(other.0)?, self.1.broadcast(other.1)?))
+    }
+}
+impl<D1: BroadcastNoAlias<E1>, D2: BroadcastNoAlias<E2>, E1, E2> BroadcastNoAlias<(E1, E2)>
+    for (D1, D2)
+{
 }
 
 // 3 axes
@@ -609,6 +719,161 @@ impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEq<(E1, NewAxis, NewAxis)>
     fn shape_eq(&self, other: &(E1, NewAxis, NewAxis)) -> bool {
         self.0 == other.0
     }
+}
+
+impl<D1: Broadcast<NewAxis>, D2: Broadcast<NewAxis>, D3: Broadcast<NewAxis>> Broadcast<()>
+    for (D1, D2, D3)
+{
+    type Output = (D1::Output, D2::Output, D3::Output);
+
+    fn broadcast(self, _other: ()) -> Option<Self::Output> {
+        Some((
+            self.0.broadcast(NewAxis)?,
+            self.1.broadcast(NewAxis)?,
+            self.2.broadcast(NewAxis)?,
+        ))
+    }
+}
+impl<
+        D1: BroadcastNoAlias<NewAxis>,
+        D2: BroadcastNoAlias<NewAxis>,
+        D3: BroadcastNoAlias<NewAxis>,
+    > BroadcastNoAlias<()> for (D1, D2, D3)
+{
+}
+
+impl<E1, E2, E3> Broadcast<(E1, E2, E3)> for ()
+where
+    NewAxis: Broadcast<E1>,
+    NewAxis: Broadcast<E2>,
+    NewAxis: Broadcast<E3>,
+{
+    type Output = (
+        <NewAxis as Broadcast<E1>>::Output,
+        <NewAxis as Broadcast<E2>>::Output,
+        <NewAxis as Broadcast<E3>>::Output,
+    );
+
+    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+        Some((
+            NewAxis.broadcast(other.0)?,
+            NewAxis.broadcast(other.1)?,
+            NewAxis.broadcast(other.2)?,
+        ))
+    }
+}
+
+impl<E1, E2, E3> BroadcastNoAlias<(E1, E2, E3)> for ()
+where
+    NewAxis: BroadcastNoAlias<E1>,
+    NewAxis: BroadcastNoAlias<E2>,
+    NewAxis: BroadcastNoAlias<E3>,
+{
+}
+
+impl<D1: Broadcast<NewAxis>, D2: Broadcast<NewAxis>, D3: Broadcast<E1>, E1> Broadcast<(E1,)>
+    for (D1, D2, D3)
+{
+    type Output = (D1::Output, D2::Output, D3::Output);
+
+    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+        Some((
+            self.0.broadcast(NewAxis)?,
+            self.1.broadcast(NewAxis)?,
+            self.2.broadcast(other.0)?,
+        ))
+    }
+}
+impl<
+        D1: BroadcastNoAlias<NewAxis>,
+        D2: BroadcastNoAlias<NewAxis>,
+        D3: BroadcastNoAlias<E1>,
+        E1,
+    > BroadcastNoAlias<(E1,)> for (D1, D2, D3)
+{
+}
+
+impl<D1: Broadcast<E3>, E1, E2, E3> Broadcast<(E1, E2, E3)> for (D1,)
+where
+    NewAxis: Broadcast<E1>,
+    NewAxis: Broadcast<E2>,
+{
+    type Output = (
+        <NewAxis as Broadcast<E1>>::Output,
+        <NewAxis as Broadcast<E2>>::Output,
+        D1::Output,
+    );
+
+    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+        Some((
+            NewAxis.broadcast(other.0)?,
+            NewAxis.broadcast(other.1)?,
+            self.0.broadcast(other.2)?,
+        ))
+    }
+}
+impl<D1: BroadcastNoAlias<E3>, E1, E2, E3> BroadcastNoAlias<(E1, E2, E3)> for (D1,)
+where
+    NewAxis: BroadcastNoAlias<E1>,
+    NewAxis: BroadcastNoAlias<E2>,
+{
+}
+
+impl<D1: Broadcast<NewAxis>, D2: Broadcast<E1>, D3: Broadcast<E2>, E1, E2> Broadcast<(E1, E2)>
+    for (D1, D2, D3)
+{
+    type Output = (D1::Output, D2::Output, D3::Output);
+
+    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+        Some((
+            self.0.broadcast(NewAxis)?,
+            self.1.broadcast(other.0)?,
+            self.2.broadcast(other.1)?,
+        ))
+    }
+}
+impl<D1: BroadcastNoAlias<NewAxis>, D2: BroadcastNoAlias<E1>, D3: BroadcastNoAlias<E2>, E1, E2>
+    BroadcastNoAlias<(E1, E2)> for (D1, D2, D3)
+{
+}
+
+impl<D1: Broadcast<E2>, D2: Broadcast<E3>, E1, E2, E3> Broadcast<(E1, E2, E3)> for (D1, D2)
+where
+    NewAxis: Broadcast<E1>,
+{
+    type Output = (<NewAxis as Broadcast<E1>>::Output, D1::Output, D2::Output);
+
+    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+        Some((
+            NewAxis.broadcast(other.0)?,
+            self.0.broadcast(other.1)?,
+            self.1.broadcast(other.2)?,
+        ))
+    }
+}
+impl<D1: BroadcastNoAlias<E2>, D2: BroadcastNoAlias<E3>, E1, E2, E3> BroadcastNoAlias<(E1, E2, E3)>
+    for (D1, D2)
+where
+    NewAxis: BroadcastNoAlias<E1>,
+{
+}
+
+impl<D1: Broadcast<E1>, D2: Broadcast<E2>, D3: Broadcast<E3>, E1, E2, E3> Broadcast<(E1, E2, E3)>
+    for (D1, D2, D3)
+{
+    type Output = (D1::Output, D2::Output, D3::Output);
+
+    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+        Some((
+            self.0.broadcast(other.0)?,
+            self.1.broadcast(other.1)?,
+            self.2.broadcast(other.2)?,
+        ))
+    }
+}
+impl<D1: BroadcastNoAlias<E1>, D2: BroadcastNoAlias<E2>, D3: BroadcastNoAlias<E3>, E1, E2, E3>
+    BroadcastNoAlias<(E1, E2, E3)> for (D1, D2, D3)
+{
 }
 
 /////////////////////////////////////////////
