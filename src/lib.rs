@@ -4,12 +4,25 @@ use std::marker;
 use std::ops;
 
 /// Represents the length of one axis of multi-dimensional data.
-/// This may be a `usize`, (e.g. 3), or
-/// a compile-time constant (e.g. `Const<3>`)
+/// This may be a `usize`, (e.g. 3),
+/// a compile-time constant (e.g. `Const<3>`),
+/// or [NewAxis] for a unit-length broadcastable axis
 pub trait Dim: 'static + Sized + Clone + Copy + fmt::Debug + Into<usize> + PartialEq {}
 
+/// Represents an axis of unit length that can be broadcast to any size.
+#[derive(Default, Clone, Copy)]
+struct NewAxis;
+
+impl fmt::Debug for NewAxis {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "_")
+    }
+}
+
 /// Represents an axis length known at compile time.
-/// The primitive type `usize` is used for a dimension not known at compile time.
+/// The primitive type `usize` is used for a dimension not known at compile time,
+/// or [NewAxis] for a unit-length broadcastable axis.
+/// (Unlike with NumPy, an axis length `Const::<1>` or `1_usize` will not broadcast)
 #[derive(Default, Clone, Copy)]
 pub struct Const<const N: usize>;
 
@@ -29,6 +42,7 @@ impl<const N: usize> From<Const<N>> for usize {
 
 impl Dim for usize {}
 
+// TODO reconsider if Eq is meaningful
 impl<const N: usize> cmp::PartialEq<Const<N>> for usize {
     fn eq(&self, _other: &Const<N>) -> bool {
         *self == N
@@ -46,6 +60,92 @@ impl<const N: usize> cmp::PartialEq<Const<N>> for Const<N> {
         true
     }
 }
+
+pub trait BroadcastDim<T> {
+    type Output;
+
+    fn broadcast_dim(self, other: T) -> Option<Self::Output>;
+}
+
+// Marker trait for if this broadcast avoids aliasing
+pub trait BroadcastDimNoAlias<T>: BroadcastDim<T> {}
+
+impl<const N: usize> BroadcastDim<Const<N>> for Const<N> {
+    type Output = Const<N>;
+
+    fn broadcast_dim(self, _other: Const<N>) -> Option<Self::Output> {
+        Some(Const::<N>)
+    }
+}
+impl<const N: usize> BroadcastDimNoAlias<Const<N>> for Const<N> {}
+
+impl<const N: usize> BroadcastDim<Const<N>> for usize {
+    type Output = Const<N>;
+
+    fn broadcast_dim(self, other: Const<N>) -> Option<Self::Output> {
+        (self != other).then_some(Const)
+    }
+}
+impl<const N: usize> BroadcastDimNoAlias<Const<N>> for usize {}
+
+impl<const N: usize> BroadcastDim<Const<N>> for NewAxis {
+    type Output = Const<N>;
+
+    fn broadcast_dim(self, _other: Const<N>) -> Option<Self::Output> {
+        Some(Const)
+    }
+}
+
+impl<const N: usize> BroadcastDim<usize> for Const<N> {
+    type Output = Const<N>;
+
+    fn broadcast_dim(self, other: usize) -> Option<Self::Output> {
+        (self != other).then_some(Const)
+    }
+}
+impl<const N: usize> BroadcastDimNoAlias<usize> for Const<N> {}
+
+impl BroadcastDim<usize> for usize {
+    type Output = usize;
+
+    fn broadcast_dim(self, other: usize) -> Option<Self::Output> {
+        (self != other).then_some(self)
+    }
+}
+impl BroadcastDimNoAlias<usize> for usize {}
+
+impl BroadcastDim<usize> for NewAxis {
+    type Output = usize;
+
+    fn broadcast_dim(self, other: usize) -> Option<Self::Output> {
+        Some(other)
+    }
+}
+
+impl<const N: usize> BroadcastDim<NewAxis> for Const<N> {
+    type Output = Const<N>;
+
+    fn broadcast_dim(self, _other: NewAxis) -> Option<Self::Output> {
+        Some(Const)
+    }
+}
+
+impl BroadcastDim<NewAxis> for usize {
+    type Output = usize;
+
+    fn broadcast_dim(self, _other: NewAxis) -> Option<Self::Output> {
+        Some(self)
+    }
+}
+
+impl BroadcastDim<NewAxis> for NewAxis {
+    type Output = NewAxis;
+
+    fn broadcast_dim(self, _other: NewAxis) -> Option<Self::Output> {
+        Some(NewAxis)
+    }
+}
+impl BroadcastDimNoAlias<NewAxis> for NewAxis {}
 
 /// A trait indicating that a type can be viewed as an [Index].
 ///
@@ -87,7 +187,6 @@ pub trait AsIndex {
 /// assert!(s.shape_eq(&(Const::<3>, Const::<4>)));
 /// assert!(s.shape_eq(&(Const::<3>, 4)));
 /// assert!(s.shape_eq(&(3, 4)));
-/// assert!(s.shape_eq(&[3, 4]));
 /// ```
 ///
 /// Since there are multiple equivalent `Shape` representations,
@@ -122,7 +221,7 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
     /// ```
     /// use nada::Shape;
     ///
-    /// assert_eq!([3, 4].num_elements(), 12)
+    /// assert_eq!((3, 4).num_elements(), 12)
     /// ```
     fn num_elements(&self) -> usize {
         self.as_index().into_iter().product()
@@ -136,7 +235,7 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
     /// ```
     /// use nada::Shape;
     ///
-    /// assert_eq!([3, 4].default_strides(), [4, 1]);
+    /// assert_eq!((3, 4).default_strides(), [4, 1]);
     /// // moving one unit along the first axis requires a stride of 4 elements,
     /// // moving one unit along the second axis requires a stride of 1 element.
     /// ```
@@ -159,7 +258,7 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
     /// ```
     /// use nada::Shape;
     ///
-    /// let shape = [2, 6];
+    /// let shape = (2, 6);
     /// shape.out_of_bounds_fail(&[1, 5]); // No panic, since 1 < 2 and 5 < 6
     /// ```
     fn out_of_bounds_fail(&self, idx: &Self::Index) {
@@ -180,7 +279,7 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
     /// ```
     /// use nada::{Const, Shape};
     ///
-    /// let shape1 = [2, 3];
+    /// let shape1 = (2, 3);
     /// let shape2 = (Const::<2>, Const::<3>);
     /// shape1.shape_mismatch_fail(&shape2); // No panic, since the shapes are the same
     /// ```
@@ -211,8 +310,6 @@ pub trait Index:
     + AsIndex<Index = Self>
 {
     // Required methods
-
-    // TODO I don't think this method is well-formed for dynamic number of dimensions
     fn zero() -> Self;
 
     /// Converts this multi-dimensional index into a linear index
@@ -255,14 +352,24 @@ pub trait Index:
 
 /// This [Shape] is equal to another `Shape`.
 /// This trait is implemented for all pairs of shapes that have some chance of success,
-/// e.g. `[usize; 1] -> (Const<3>,)` (at runtime, the usize is checked to be 3.)
+/// e.g. `(usize,) -> (Const<3>,)` (at runtime, the usize is checked to be 3.)
 /// It is not implemented for conversions that have no chance of success at compile time
 /// e.g. `(Const<4>, Const<5>) -> (Const<4>, Const<6>)`
-pub trait ShapeEq<O: Shape>: Shape<Index: IntoIndex<O::Index>> {
+pub trait ShapeEq<O: Shape>: Shape<Index: Into<O::Index>> {
     /// Return `true` if the shapes are equal, `false` if they are not.
     fn shape_eq(&self, other: &O) -> bool;
 }
 
+pub trait BroadcastShape<T: Shape>: Shape {
+    type Output: Shape;
+
+    fn broadcast_shape(self, other: T) -> Option<Self::Output>;
+}
+
+// Marker trait for if this broadcast avoids aliasing
+pub trait BroadcastShapeNoAlias<T: Shape>: BroadcastShape<T> {}
+
+/*
 /// This [Index] type can be converted from another index.
 /// This trait is implemented for all conversions that have some chance of success.
 /// It is not implemented for conversions that have no chance of success at compile time
@@ -324,20 +431,13 @@ where
         U::from_index_fail(self)
     }
 }
+*/
 
 impl<const N: usize> AsIndex for [usize; N] {
     type Index = [usize; N];
 
     fn as_index(&self) -> Self::Index {
         *self
-    }
-}
-
-impl<const N: usize> Shape for [usize; N] {}
-
-impl<const N: usize> ShapeEq<[usize; N]> for [usize; N] {
-    fn shape_eq(&self, other: &[usize; N]) -> bool {
-        self == other
     }
 }
 
@@ -351,11 +451,33 @@ impl<const N: usize> Index for [usize; N] {
     }
 }
 
+/*
 impl<const N: usize> FromIndex<[usize; N]> for [usize; N] {
     fn try_from_index(other: [usize; N]) -> Option<[usize; N]> {
         Some(other)
     }
 }
+*/
+
+// 0 axes
+
+impl AsIndex for () {
+    type Index = [usize; 0];
+
+    fn as_index(&self) -> Self::Index {
+        []
+    }
+}
+
+impl Shape for () {}
+
+impl ShapeEq<()> for () {
+    fn shape_eq(&self, _other: &()) -> bool {
+        true
+    }
+}
+
+// 1 axis
 
 impl<D1: Dim> AsIndex for (D1,) {
     type Index = [usize; 1];
@@ -373,20 +495,7 @@ impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEq<(E1,)> for (D1,) {
     }
 }
 
-impl<D1: Dim + cmp::PartialEq<usize>> ShapeEq<[usize; 1]> for (D1,) {
-    fn shape_eq(&self, other: &[usize; 1]) -> bool {
-        self.0 == other[0]
-    }
-}
-
-impl<D1: Dim> ShapeEq<(D1,)> for [usize; 1]
-where
-    usize: PartialEq<D1>,
-{
-    fn shape_eq(&self, other: &(D1,)) -> bool {
-        self[0] == other.0
-    }
-}
+// 2 axes
 
 impl<D1: Dim, D2: Dim> AsIndex for (D1, D2) {
     type Index = [usize; 2];
@@ -406,19 +515,99 @@ impl<D1: Dim + PartialEq<E1>, D2: Dim + PartialEq<E2>, E1: Dim, E2: Dim> ShapeEq
     }
 }
 
-impl<D1: Dim + PartialEq<usize>, D2: Dim + PartialEq<usize>> ShapeEq<[usize; 2]> for (D1, D2) {
-    fn shape_eq(&self, other: &[usize; 2]) -> bool {
-        self.0 == other[0] && self.1 == other[1]
+impl<D1: Dim> AsIndex for (D1, NewAxis) {
+    type Index = [usize; 1];
+
+    fn as_index(&self) -> Self::Index {
+        [self.0.into()]
     }
 }
 
-impl<D1: Dim, D2: Dim> ShapeEq<(D1, D2)> for [usize; 2]
-where
-    usize: PartialEq<D1>,
-    usize: PartialEq<D2>,
+impl<D1: Dim> Shape for (D1, NewAxis) {}
+
+impl<D1: Dim + PartialEq<E1>, E1: Dim> ShapeEq<(E1, NewAxis)> for (D1, NewAxis) {
+    fn shape_eq(&self, other: &(E1, NewAxis)) -> bool {
+        self.0 == other.0
+    }
+}
+
+// 3 axes
+
+impl<D1: Dim, D2: Dim, D3: Dim> AsIndex for (D1, D2, D3) {
+    type Index = [usize; 3];
+
+    fn as_index(&self) -> Self::Index {
+        [self.0.into(), self.1.into(), self.2.into()]
+    }
+}
+
+impl<D1: Dim, D2: Dim, D3: Dim> Shape for (D1, D2, D3) {}
+
+impl<
+        D1: Dim + PartialEq<E1>,
+        D2: Dim + PartialEq<E2>,
+        D3: Dim + PartialEq<E3>,
+        E1: Dim,
+        E2: Dim,
+        E3: Dim,
+    > ShapeEq<(E1, E2, E3)> for (D1, D2, D3)
 {
-    fn shape_eq(&self, other: &(D1, D2)) -> bool {
-        self[0] == other.0 && self[1] == other.1
+    fn shape_eq(&self, other: &(E1, E2, E3)) -> bool {
+        self.0 == other.0 && self.1 == other.1 && self.2 == other.2
+    }
+}
+
+impl<D1: Dim, D2: Dim> AsIndex for (D1, D2, NewAxis) {
+    type Index = [usize; 2];
+
+    fn as_index(&self) -> Self::Index {
+        [self.0.into(), self.1.into()]
+    }
+}
+
+impl<D1: Dim, D2: Dim> Shape for (D1, D2, NewAxis) {}
+
+impl<D1: Dim + PartialEq<E1>, D2: Dim + PartialEq<E2>, E1: Dim, E2: Dim> ShapeEq<(E1, E2, NewAxis)>
+    for (D1, D2, NewAxis)
+{
+    fn shape_eq(&self, other: &(E1, E2, NewAxis)) -> bool {
+        self.0 == other.0 && self.1 == other.1
+    }
+}
+
+impl<D1: Dim, D2: Dim> AsIndex for (D1, NewAxis, D2) {
+    type Index = [usize; 2];
+
+    fn as_index(&self) -> Self::Index {
+        [self.0.into(), self.2.into()]
+    }
+}
+
+impl<D1: Dim, D2: Dim> Shape for (D1, NewAxis, D2) {}
+
+impl<D1: Dim + PartialEq<E1>, D2: Dim + PartialEq<E2>, E1: Dim, E2: Dim> ShapeEq<(E1, NewAxis, E2)>
+    for (D1, NewAxis, D2)
+{
+    fn shape_eq(&self, other: &(E1, NewAxis, E2)) -> bool {
+        self.0 == other.0 && self.2 == other.2
+    }
+}
+
+impl<D1: Dim> AsIndex for (D1, NewAxis, NewAxis) {
+    type Index = [usize; 1];
+
+    fn as_index(&self) -> Self::Index {
+        [self.0.into()]
+    }
+}
+
+impl<D1: Dim> Shape for (D1, NewAxis, NewAxis) {}
+
+impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEq<(E1, NewAxis, NewAxis)>
+    for (D1, NewAxis, NewAxis)
+{
+    fn shape_eq(&self, other: &(E1, NewAxis, NewAxis)) -> bool {
+        self.0 == other.0
     }
 }
 
@@ -651,7 +840,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>>
         View {
             shape,
             offset: self.offset,
-            strides: self.strides.into_index_fail(),
+            strides: self.strides.into(),
             data: &self.data,
         }
     }
@@ -676,7 +865,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewWithShape<S, D> for Vi
         View {
             shape,
             offset: self.offset,
-            strides: self.strides.into_index_fail(),
+            strides: self.strides.into(),
             data: self.data,
         }
     }
@@ -701,7 +890,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewWithShape<S, D> for Vi
         View {
             shape,
             offset: self.offset,
-            strides: self.strides.into_index_fail(),
+            strides: self.strides.into(),
             data: self.data,
         }
     }
@@ -778,7 +967,7 @@ impl<
         ViewMut {
             shape,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
+            strides: self.strides.into(), // Shouldn't fail if shapes match
             data: &mut self.data,
         }
     }
@@ -805,7 +994,7 @@ impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewMutWithShape<S, D>
         ViewMut {
             shape,
             offset: self.offset,
-            strides: self.strides.into_index_fail(), // Shouldn't fail if shapes match
+            strides: self.strides.into(), // Shouldn't fail if shapes match
             data: self.data,
         }
     }
@@ -1212,7 +1401,7 @@ impl<
         View {
             shape,
             offset: self.array.offset,
-            strides: self.array.strides.into_index_fail().into_index_fail(),
+            strides: self.array.strides.into().into(),
             data: &self.array.data,
         }
     }
@@ -1227,7 +1416,7 @@ impl<S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Ta
         View {
             shape: self.shape.clone(),
             offset: self.array.offset,
-            strides: self.array.strides.into_index_fail(),
+            strides: self.array.strides.into(),
             data: &self.array.data,
         }
     }
@@ -1246,7 +1435,7 @@ impl<
         ViewMut {
             shape,
             offset: self.array.offset,
-            strides: self.array.strides.into_index_fail().into_index_fail(),
+            strides: self.array.strides.into().into(),
             data: &mut self.array.data,
         }
     }
@@ -1263,7 +1452,7 @@ impl<
         ViewMut {
             shape: self.shape.clone(),
             offset: self.array.offset,
-            strides: self.array.strides.into_index_fail(),
+            strides: self.array.strides.into(),
             data: &mut self.array.data,
         }
     }
@@ -1384,18 +1573,14 @@ mod test {
         assert!(s.shape_eq(&(Const::<3>, Const::<4>)));
         assert!(s.shape_eq(&(Const::<3>, 4)));
         assert!(s.shape_eq(&(3, 4)));
-        assert!(s.shape_eq(&[3, 4]));
         assert!(!s.shape_eq(&(Const::<3>, 5)));
         assert!(!s.shape_eq(&(3, 5)));
-        assert!(!s.shape_eq(&[3, 5]));
 
         assert!((Const::<3>, Const::<4>).shape_eq(&s));
         assert!((Const::<3>, 4).shape_eq(&s));
         assert!((3, 4).shape_eq(&s));
-        assert!([3, 4].shape_eq(&s));
         assert!(!(Const::<3>, 5).shape_eq(&s));
         assert!(!(3, 5).shape_eq(&s));
-        assert!(![3, 5].shape_eq(&s));
     }
 
     #[test]
@@ -1485,8 +1670,8 @@ mod test {
         //bernstein_coef(&a.view(), &mut b);
 
         dbg!(bernstein_coef(&a, alloc()));
-        dbg!(bernstein_coef(&a, alloc_shape([2, 2])));
-        panic!();
+        dbg!(bernstein_coef(&a, alloc_shape((2, 2))));
+        //panic!();
 
         //bernstein_coef(&a, &mut b);
     }
@@ -1530,6 +1715,6 @@ mod test {
         };
 
         ones(&mut a);
-        ones(alloc_shape([4, 4]));
+        ones(alloc_shape((4, 4)));
     }
 }
