@@ -1,13 +1,37 @@
-use std::cmp;
 use std::fmt;
 use std::marker;
 use std::ops;
 
-/// Represents the length of one axis of multi-dimensional data.
-/// This may be a `usize`, (e.g. 3),
-/// a compile-time constant (e.g. `Const<3>`),
-/// or [NewAxis] for a unit-length broadcastable axis
-pub trait Dim: 'static + Sized + Clone + Copy + fmt::Debug + Into<usize> + PartialEq {}
+// Helper trait for building up fixed-length arrays
+pub trait FixedLengthArray: Sized {
+    type OneBigger;
+
+    fn prepend(self, e: usize) -> Self::OneBigger;
+}
+
+impl FixedLengthArray for [usize; 0] {
+    type OneBigger = [usize; 1];
+
+    fn prepend(self, e: usize) -> Self::OneBigger {
+        [e]
+    }
+}
+
+impl FixedLengthArray for [usize; 1] {
+    type OneBigger = [usize; 2];
+
+    fn prepend(self, e: usize) -> Self::OneBigger {
+        [e, self[0]]
+    }
+}
+
+impl FixedLengthArray for [usize; 2] {
+    type OneBigger = [usize; 3];
+
+    fn prepend(self, e: usize) -> Self::OneBigger {
+        [e, self[0], self[1]]
+    }
+}
 
 /// Represents an axis of unit length that can be broadcast to any size.
 #[derive(Default, Clone, Copy)]
@@ -32,120 +56,24 @@ impl<const N: usize> fmt::Debug for Const<N> {
     }
 }
 
-impl<const N: usize> Dim for Const<N> {}
-
-impl<const N: usize> From<Const<N>> for usize {
-    fn from(_other: Const<N>) -> usize {
-        N
-    }
+pub trait ConvertIndex<T: Shape>: Shape {
+    fn convert_index(index: Self::Index) -> T::Index;
 }
 
-impl Dim for usize {}
-
-// TODO reconsider if Eq is meaningful
-impl<const N: usize> cmp::PartialEq<Const<N>> for usize {
-    fn eq(&self, _other: &Const<N>) -> bool {
-        *self == N
-    }
-}
-
-impl<const N: usize> cmp::PartialEq<usize> for Const<N> {
-    fn eq(&self, other: &usize) -> bool {
-        N == *other
-    }
-}
-
-impl<const N: usize> cmp::PartialEq<Const<N>> for Const<N> {
-    fn eq(&self, _other: &Const<N>) -> bool {
-        true
-    }
-}
-
-pub trait Broadcast<T> {
+pub trait BroadcastShape<T: Shape>: Shape
+where
+    Self::Output: ConvertIndex<Self>,
+    Self::Output: ConvertIndex<T>,
+{
     type Output;
 
-    fn broadcast(self, other: T) -> Option<Self::Output>;
+    fn broadcast_shape(self, other: T) -> Option<Self::Output>;
 }
 
 // Marker trait for if this broadcast avoids aliasing
-pub trait BroadcastNoAlias<T>: Broadcast<T> {}
+pub trait BroadcastShapeNoAlias<T: Shape>: BroadcastShape<T> {}
 
-impl<const N: usize> Broadcast<Const<N>> for Const<N> {
-    type Output = Const<N>;
-
-    fn broadcast(self, _other: Const<N>) -> Option<Self::Output> {
-        Some(Const::<N>)
-    }
-}
-impl<const N: usize> BroadcastNoAlias<Const<N>> for Const<N> {}
-
-impl<const N: usize> Broadcast<Const<N>> for usize {
-    type Output = Const<N>;
-
-    fn broadcast(self, other: Const<N>) -> Option<Self::Output> {
-        (self != other).then_some(Const)
-    }
-}
-impl<const N: usize> BroadcastNoAlias<Const<N>> for usize {}
-
-impl<const N: usize> Broadcast<Const<N>> for NewAxis {
-    type Output = Const<N>;
-
-    fn broadcast(self, _other: Const<N>) -> Option<Self::Output> {
-        Some(Const)
-    }
-}
-
-impl<const N: usize> Broadcast<usize> for Const<N> {
-    type Output = Const<N>;
-
-    fn broadcast(self, other: usize) -> Option<Self::Output> {
-        (self != other).then_some(Const)
-    }
-}
-impl<const N: usize> BroadcastNoAlias<usize> for Const<N> {}
-
-impl Broadcast<usize> for usize {
-    type Output = usize;
-
-    fn broadcast(self, other: usize) -> Option<Self::Output> {
-        (self != other).then_some(self)
-    }
-}
-impl BroadcastNoAlias<usize> for usize {}
-
-impl Broadcast<usize> for NewAxis {
-    type Output = usize;
-
-    fn broadcast(self, other: usize) -> Option<Self::Output> {
-        Some(other)
-    }
-}
-
-impl<const N: usize> Broadcast<NewAxis> for Const<N> {
-    type Output = Const<N>;
-
-    fn broadcast(self, _other: NewAxis) -> Option<Self::Output> {
-        Some(Const)
-    }
-}
-
-impl Broadcast<NewAxis> for usize {
-    type Output = usize;
-
-    fn broadcast(self, _other: NewAxis) -> Option<Self::Output> {
-        Some(self)
-    }
-}
-
-impl Broadcast<NewAxis> for NewAxis {
-    type Output = NewAxis;
-
-    fn broadcast(self, _other: NewAxis) -> Option<Self::Output> {
-        Some(NewAxis)
-    }
-}
-impl BroadcastNoAlias<NewAxis> for NewAxis {}
+// Broadcast
 
 /// A trait indicating that a type can be viewed as an [Index].
 ///
@@ -291,6 +219,30 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
             panic!("Shapes do not match: {self:?} != {other:?}");
         }
     }
+
+    /// Tries to broadcast the two shapes together, and panics if it fails.
+    ///
+    /// Fails to compile if the two shape types could never be broadcast together,
+    /// such as `(Const::<2>,)` and `(Const::<3>,)`
+    /// (see [Broadcast].)
+    ///
+    /// ```
+    /// use nada::{Const, Broadcast};
+    ///
+    /// let shape1 = (Const::<2>, Const::<3>);
+    /// let shape2 = (2, 3);
+    /// let shape3 = (3,);
+    /// assert_eq!(shape1, shape1.shape_broadcast_fail(&shape2)); // No panic since the shapes are equal
+    /// assert_eq!(shape1, shape1.shape_broadcast_fail(&shape3)); // No panic since the shapes are compatible
+    /// ```
+    fn shape_broadcast_fail<S: Shape>(&self, other: &S)
+    where
+        Self: ShapeEq<S>,
+    {
+        if !self.shape_eq(other) {
+            panic!("Shapes cannot be broadcast together: {self:?} and {other:?}");
+        }
+    }
 }
 
 /// Represents the coordinates of an element in multi-dimensional data,
@@ -360,79 +312,6 @@ pub trait ShapeEq<O: Shape>: Shape<Index: Into<O::Index>> {
     fn shape_eq(&self, other: &O) -> bool;
 }
 
-pub trait BroadcastShape<T: Shape>: Shape {
-    type Output: Shape;
-
-    fn broadcast_shape(self, other: T) -> Option<Self::Output>;
-}
-
-// Marker trait for if this broadcast avoids aliasing
-pub trait BroadcastShapeNoAlias<T: Shape>: BroadcastShape<T> {}
-
-/*
-/// This [Index] type can be converted from another index.
-/// This trait is implemented for all conversions that have some chance of success.
-/// It is not implemented for conversions that have no chance of success at compile time
-/// e.g. `[usize; 2] -> [usize; 3]`
-///
-/// If two [Shapes](Shape) are equal, then their indices are compatible
-/// and these conversions will never fail
-/// (although you still must perform the type conversion with `from_index_fail`.)
-///
-/// See also: [IntoIndex].
-pub trait FromIndex<O: Index>: Index {
-    /// Convert to the given index into this compatible index type,
-    /// returning None if they turn out not to be compatible at runtime.
-    fn try_from_index(other: O) -> Option<Self>;
-
-    /// Convert to this index from the given compile-time compatible index,
-    /// panicking if they turn out not to be compatible at runtime.
-    fn from_index_fail(other: O) -> Self {
-        Self::try_from_index(other).unwrap_or_else(|| {
-            panic!(
-                "Indices are not compatible: type={} got={other:?}",
-                std::any::type_name::<Self>()
-            )
-        })
-    }
-}
-
-/// This [Index] can be converted into another index type.
-///
-/// This trait is implemented for all conversions that have some chance of success.
-/// It is not implemented for conversions that have no chance of success at compile time
-/// e.g. `[usize; 2] -> [usize; 3]`
-///
-/// If two [Shapes](Shape) are equal, then their indices are compatible
-/// and these conversions will never fail
-/// (although you still must perform the type conversion with `into_index_fail`.)
-///
-/// If you are implementing this trait, prefer [FromIndex] since
-/// `IntoIndex` has a blanket implementation for `FromIndex`.
-pub trait IntoIndex<T: Index>: Index {
-    /// Convert from this index into the given compile-time compatible index,
-    /// returning None if they turn out not to be compatible at runtime.
-    fn try_into_index(self) -> Option<T>;
-
-    /// Convert from this index into the given compile-time compatible index,
-    /// panicking if they turn out not to be compatible at runtime.
-    fn into_index_fail(self) -> T;
-}
-
-impl<T: Index, U> IntoIndex<U> for T
-where
-    U: FromIndex<T>,
-{
-    fn try_into_index(self) -> Option<U> {
-        U::try_from_index(self)
-    }
-
-    fn into_index_fail(self) -> U {
-        U::from_index_fail(self)
-    }
-}
-*/
-
 impl<const N: usize> AsIndex for [usize; N] {
     type Index = [usize; N];
 
@@ -451,15 +330,10 @@ impl<const N: usize> Index for [usize; N] {
     }
 }
 
-/*
-impl<const N: usize> FromIndex<[usize; N]> for [usize; N] {
-    fn try_from_index(other: [usize; N]) -> Option<[usize; N]> {
-        Some(other)
-    }
-}
-*/
+/////////////////////////////////////////////
+// Shape Implementations
 
-// 0 axes
+// Base case-- 0D
 
 impl AsIndex for () {
     type Index = [usize; 0];
@@ -477,61 +351,356 @@ impl ShapeEq<()> for () {
     }
 }
 
-impl Broadcast<()> for () {
+impl BroadcastShape<()> for () {
     type Output = ();
 
-    fn broadcast(self, _other: ()) -> Option<()> {
+    fn broadcast_shape(self, _other: ()) -> Option<()> {
         Some(())
     }
 }
-impl BroadcastNoAlias<()> for () {}
+impl BroadcastShapeNoAlias<()> for () {}
 
-// 1 axis
-
-impl<D1: Dim> AsIndex for (D1,) {
-    type Index = [usize; 1];
-
-    fn as_index(&self) -> Self::Index {
-        [self.0.into()]
+impl ConvertIndex<()> for () {
+    fn convert_index(_index: [usize; 0]) -> [usize; 0] {
+        []
     }
 }
 
-impl<D1: Dim> Shape for (D1,) {}
+// Recursive case
 
-impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEq<(E1,)> for (D1,) {
-    fn shape_eq(&self, other: &(E1,)) -> bool {
-        self.0 == other.0
-    }
+macro_rules! impl_shape {
+    ($($An:ident)*, $($an:ident)*) => {
+
+        // impl AsIndex for tuples that look like (Const<N>, ...)
+        impl<const N: usize, $($An: Copy,)*> AsIndex for (Const<N>, $($An,)*)
+        where
+            ($($An,)*): Shape<Index: FixedLengthArray<OneBigger: Index>>,
+        {
+            type Index = <<($($An,)*) as AsIndex>::Index as FixedLengthArray>::OneBigger;
+
+            fn as_index(&self) -> Self::Index {
+                let &(_, $($an,)*) = self;
+                ($($an,)*).as_index().prepend(N)
+            }
+        }
+        impl<const N: usize, $($An: Copy + fmt::Debug,)*> Shape for (Const<N>, $($An,)*)
+        where
+            ($($An,)*): Shape<Index: FixedLengthArray<OneBigger: Index>>, {}
+
+        // impl AsIndex for tuples that look like (usize, ...)
+        impl<$($An: Copy,)*> AsIndex for (usize, $($An,)*)
+        where
+            ($($An,)*): Shape<Index: FixedLengthArray<OneBigger: Index>>,
+        {
+            type Index = <<($($An,)*) as AsIndex>::Index as FixedLengthArray>::OneBigger;
+
+            fn as_index(&self) -> Self::Index {
+                let &(e, $($an,)*) = self;
+                ($($an,)*).as_index().prepend(e)
+            }
+        }
+        impl<$($An: Copy + fmt::Debug,)*> Shape for (usize, $($An,)*)
+        where
+            ($($An,)*): Shape<Index: FixedLengthArray<OneBigger: Index>>,
+        {}
+
+        // impl AsIndex for tuples that look like (NewAxis, ...)
+        impl<$($An: Copy,)*> AsIndex for (NewAxis, $($An,)*)
+        where
+            ($($An,)*): Shape,
+        {
+            type Index = <($($An,)*) as AsIndex>::Index;
+
+            fn as_index(&self) -> Self::Index {
+                let &(_, $($an,)*) = self;
+                ($($an,)*).as_index()
+            }
+        }
+        impl<$($An: Copy + fmt::Debug,)*> Shape for (NewAxis, $($An,)*)
+        where
+            ($($An,)*): Shape,
+        {}
+    };
 }
 
-impl<D1: Broadcast<NewAxis>> Broadcast<()> for (D1,) {
+macro_rules! impl_shape_eq {
+    (,,,) => {
+        // ShapeEq<(Const<N>, ...)> for (Const<N>, ...)
+        impl<const N: usize> ShapeEq<(Const<N>,)> for (Const<N>,)
+        where
+            (Const<N>,): Shape,
+        {
+            fn shape_eq(&self, _other: &(Const<N>,)) -> bool {
+                true
+            }
+        }
+
+        // ShapeEq<(usize, ...)> for (Const<N>, ...)
+        impl<const N: usize,  > ShapeEq<(usize, )> for (Const<N>, )
+        where
+            (Const<N>, ): Shape<Index = <(usize, ) as AsIndex>::Index>,
+            (usize, ): Shape,
+        {
+            fn shape_eq(&self, other: &(usize, )) -> bool {
+                let &(_, ) = self;
+                let &(e, ) = other;
+                N == e
+            }
+        }
+
+        // ShapeEq<(Const<N>, ...)> for (usize, ...)
+        impl<const N: usize,  > ShapeEq<(Const<N>, )> for (usize, )
+        where
+            (usize, ): Shape<Index = <(Const<N>, ) as AsIndex>::Index>,
+            (Const<N>, ): Shape,
+        {
+            fn shape_eq(&self, other: &(Const<N>, )) -> bool {
+                let &(e, ) = self;
+                let &(_, ) = other;
+                e == N
+            }
+        }
+
+        // ShapeEq<(usize, ...)> for (usize, ...)
+        impl ShapeEq<(usize, )> for (usize, )
+        where
+            (usize, ): Shape,
+        {
+            fn shape_eq(&self, other: &(usize, )) -> bool {
+                let &(e, ) = self;
+                let &(f, ) = other;
+                e == f
+            }
+        }
+
+        // ShapeEq<(NewAxis, ...)> for (NewAxis, ...)
+        impl< > ShapeEq<(NewAxis, )> for (NewAxis, )
+        where
+            (NewAxis, ): Shape,
+        {
+            fn shape_eq(&self, _other: &(NewAxis, )) -> bool {
+                true
+            }
+        }
+    };
+    ($($An:ident)*, $($an:ident)*, $($Bn:ident)*, $($bn:ident)*) => {
+
+        // ShapeEq<(Const<N>, ...)> for (Const<N>, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> ShapeEq<(Const<N>, $($Bn,)*)> for (Const<N>, $($An,)*)
+        where
+            (Const<N>, $($An,)*): Shape<Index = <(Const<N>, $($Bn,)*) as AsIndex>::Index>,
+            (Const<N>, $($Bn,)*): Shape,
+            ($($An,)*): ShapeEq<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn shape_eq(&self, other: &(Const<N>, $($Bn,)*)) -> bool {
+                let &(_, $($an,)*) = self;
+                let &(_, $($bn,)*) = other;
+                ($($an,)*).shape_eq(&($($bn,)*))
+            }
+        }
+
+        // ShapeEq<(usize, ...)> for (Const<N>, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> ShapeEq<(usize, $($Bn,)*)> for (Const<N>, $($An,)*)
+        where
+            (Const<N>, $($An,)*): Shape<Index = <(usize, $($Bn,)*) as AsIndex>::Index>,
+            (usize, $($Bn,)*): Shape,
+            ($($An,)*): ShapeEq<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn shape_eq(&self, other: &(usize, $($Bn,)*)) -> bool {
+                let &(_, $($an,)*) = self;
+                let &(e, $($bn,)*) = other;
+                N == e && ($($an,)*).shape_eq(&($($bn,)*))
+            }
+        }
+
+
+        // ShapeEq<(Const<N>, ...)> for (usize, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> ShapeEq<(Const<N>, $($Bn,)*)> for (usize, $($An,)*)
+        where
+            (usize, $($An,)*): Shape<Index = <(Const<N>, $($Bn,)*) as AsIndex>::Index>,
+            (Const<N>, $($Bn,)*): Shape,
+            ($($An,)*): ShapeEq<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn shape_eq(&self, other: &(Const<N>, $($Bn,)*)) -> bool {
+                let &(e, $($an,)*) = self;
+                let &(_, $($bn,)*) = other;
+                e == N && ($($an,)*).shape_eq(&($($bn,)*))
+            }
+        }
+
+        // ShapeEq<(usize, ...)> for (usize, ...)
+        impl<$($An: Copy,)* $($Bn: Copy,)*> ShapeEq<(usize, $($Bn,)*)> for (usize, $($An,)*)
+        where
+            (usize, $($An,)*): Shape<Index = <(usize, $($Bn,)*) as AsIndex>::Index>,
+            (usize, $($Bn,)*): Shape,
+            ($($An,)*): ShapeEq<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn shape_eq(&self, other: &(usize, $($Bn,)*)) -> bool {
+                let &(e, $($an,)*) = self;
+                let &(f, $($bn,)*) = other;
+                e == f && ($($an,)*).shape_eq(&($($bn,)*))
+            }
+        }
+
+        // ShapeEq<(NewAxis, ...)> for (NewAxis, ...)
+        impl<$($An: Copy,)* $($Bn: Copy,)*> ShapeEq<(NewAxis, $($Bn,)*)> for (NewAxis, $($An,)*)
+        where
+            (NewAxis, $($An,)*): Shape<Index = <(NewAxis, $($Bn,)*) as AsIndex>::Index>,
+            (NewAxis, $($Bn,)*): Shape,
+            ($($An,)*): ShapeEq<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn shape_eq(&self, other: &(NewAxis, $($Bn,)*)) -> bool {
+                let &(_, $($an,)*) = self;
+                let &(_, $($bn,)*) = other;
+                ($($an,)*).shape_eq(&($($bn,)*))
+            }
+        }
+    };
+}
+
+macro_rules! impl_shape_eq_reduction {
+    (,,,, $($NewAxis:ident)*, $($NAUnderscore:ident)*) => {
+        // ShapeEq<(...)> for (NewAxis, ...)
+        // ShapeEq<(...)> for (NewAxis, NewAxis, ...)
+        // etc.
+        impl ShapeEq<()> for ($($NewAxis,)*)
+        {
+            fn shape_eq(&self, _other: &()) -> bool {
+                true
+            }
+        }
+
+        // ShapeEq<(NewAxis, ...)> for (...)
+        // ShapeEq<(NewAxis, NewAxis, ...)> for (...)
+        // etc.
+        impl ShapeEq<($($NewAxis,)*)> for ()
+        {
+            fn shape_eq(&self, _other: &($($NewAxis,)*)) -> bool {
+                true
+            }
+        }
+    };
+    ($($An:ident)*, $($an:ident)*, $($Bn:ident)*, $($bn:ident)*, $($NewAxis:ident)*, $($NAUnderscore:ident)*) => {
+        // ShapeEq<(...)> for (NewAxis, ...)
+        // ShapeEq<(...)> for (NewAxis, NewAxis, ...)
+        // etc.
+        impl<$($An: Copy,)* $($Bn: Copy,)*> ShapeEq<($($Bn,)*)> for ($($NewAxis,)* $($An,)*)
+        where
+            ($($NewAxis,)* $($An,)*): Shape<Index = <($($Bn,)*) as AsIndex>::Index>,
+            ($($Bn,)*): Shape,
+            ($($An,)*): ShapeEq<($($Bn,)*)>,
+        {
+            fn shape_eq(&self, other: &($($Bn,)*)) -> bool {
+                let &($($NAUnderscore,)* $($an,)*) = self;
+                let &($($bn,)*) = other;
+                ($($an,)*).shape_eq(&($($bn,)*))
+            }
+        }
+
+        // ShapeEq<(NewAxis, ...)> for (...)
+        // ShapeEq<(NewAxis, NewAxis, ...)> for (...)
+        // etc.
+        impl<$($An: Copy,)* $($Bn: Copy,)*> ShapeEq<($($NewAxis,)* $($Bn,)*)> for ($($An,)*)
+        where
+            ($($An,)*): Shape<Index = <($($NewAxis,)* $($Bn,)*) as AsIndex>::Index>,
+            ($($NewAxis,)* $($Bn,)*): Shape,
+            ($($Bn,)*): Shape,
+            ($($An,)*): ShapeEq<($($Bn,)*)>,
+        {
+            fn shape_eq(&self, other: &($($NewAxis,)* $($Bn,)*)) -> bool {
+                let &($($an,)*) = self;
+                let &($($NAUnderscore,)* $($bn,)*) = other;
+                ($($an,)*).shape_eq(&($($bn,)*))
+            }
+        }
+    };
+}
+
+impl_shape!(,); // 1D
+impl_shape!(A0, a0); // 2D
+impl_shape!(A0 A1, a0 a1); // 3D
+impl_shape!(A0 A1 A2, a0 a1 a2); // 4D
+
+impl_shape_eq!(,,,); // 1D
+impl_shape_eq!(A0, a0, B0, b0); // 2D
+impl_shape_eq!(A0 A1, a0 a1, B0 B1, b0 b1); // 3D
+impl_shape_eq!(A0 A1 A2, a0 a1 a2, B0 B1 B2, b0 b1 b2); // 4D
+
+impl_shape_eq_reduction!(,,,, NewAxis, _c0); // 1D
+
+impl_shape_eq_reduction!(,,,, NewAxis NewAxis, _c0 _c1); // 2D
+impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis, _c0); // 2D
+
+impl_shape_eq_reduction!(,,,, NewAxis NewAxis NewAxis, _c0 _c1 _c2); // 3D
+impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis NewAxis, _c0 _c1); // 3D
+impl_shape_eq_reduction!(A0 A1, a0 a1, B0 B1, b0 b1, NewAxis, _c0); // 3D
+
+impl_shape_eq_reduction!(,,,, NewAxis NewAxis NewAxis NewAxis, _c0 _c1 _c2 _c3); // 4D
+impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis NewAxis NewAxis, _c0 _c1 _c2); // 4D
+impl_shape_eq_reduction!(A0 A1, a0 a1, B0 B1, b0 b1, NewAxis NewAxis, _c0 _c2); // 4D
+impl_shape_eq_reduction!(A0 A1 A2, a0 a1 a2, B0 B1 B2, b0 b1 b2, NewAxis, _c0); // 4D
+
+/*
+impl<D1: BroadcastDim<NewAxis, Output: Dim>> BroadcastShape<()> for (D1,) {
     type Output = (D1::Output,);
 
-    fn broadcast(self, _other: ()) -> Option<Self::Output> {
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
         Some((self.0.broadcast(NewAxis)?,))
     }
 }
 impl<D1: BroadcastNoAlias<NewAxis>> BroadcastNoAlias<()> for (D1,) {}
 
-impl<E1> Broadcast<(E1,)> for ()
-where
-    NewAxis: Broadcast<E1>,
-{
-    type Output = (<NewAxis as Broadcast<E1>>::Output,);
+/////
 
-    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+impl<D1: BroadcastDim<NewAxis, Output: Dim>> BroadcastShape<()> for (D1,) {
+    type Output = (D1::Output,);
+
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+        Some((self.0.broadcast(NewAxis)?,))
+    }
+}
+impl<D1: BroadcastNoAlias<NewAxis>> BroadcastNoAlias<()> for (D1,) {}
+
+impl<E1> BroadcastShape<(E1,)> for ()
+where
+    NewAxis: BroadcastDim<E1>,
+{
+    type Output = (<NewAxis as BroadcastDim<E1>>::Output,);
+
+    fn broadcast_shape(self, other: (E1,)) -> Option<Self::Output> {
         Some((NewAxis.broadcast(other.0)?,))
     }
 }
 impl<E1> BroadcastNoAlias<(E1,)> for () where NewAxis: BroadcastNoAlias<E1> {}
 
-impl<D1: Broadcast<E1>, E1> Broadcast<(E1,)> for (D1,) {
-    type Output = (<D1 as Broadcast<E1>>::Output,);
-    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+impl<D1: BroadcastDim<E1>, E1> BroadcastShape<(E1,)> for (D1,) {
+    type Output = (<D1 as BroadcastDim<E1>>::Output,);
+    fn broadcast_shape(self, other: (E1,)) -> Option<Self::Output> {
         Some((self.0.broadcast(other.0)?,))
     }
 }
-impl<D1: BroadcastNoAlias<E1>, E1> BroadcastNoAlias<(E1,)> for (D1,) {}
+impl<D1: BroadcastDimNoAlias<E1>, E1> BroadcastShapeNoAlias<(E1,)> for (D1,) {}
+
+impl<E1> ConvertIndex<(E1,)> for ()
+where
+    (E1,): Shape<Index = [usize; 1]>,
+    NewAxis: BroadcastDim<E1>,
+{
+    fn convert_index(_index: [usize; 0]) -> [usize; 1] {
+        [0]
+    }
+}
+
+impl<D1: BroadcastDim<E1>, E1> ConvertIndex<(E1,)> for (D1,) {
+    fn convert_index(index: [usize; 1]) -> [usize; 1] {
+        index
+    }
+}
 
 // 2 axes
 
@@ -569,10 +738,10 @@ impl<D1: Dim + PartialEq<E1>, E1: Dim> ShapeEq<(E1, NewAxis)> for (D1, NewAxis) 
     }
 }
 
-impl<D1: Broadcast<NewAxis>, D2: Broadcast<NewAxis>> Broadcast<()> for (D1, D2) {
+impl<D1: BroadcastDim<NewAxis>, D2: BroadcastDim<NewAxis>> BroadcastShape<()> for (D1, D2) {
     type Output = (D1::Output, D2::Output);
 
-    fn broadcast(self, _other: ()) -> Option<Self::Output> {
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
         Some((self.0.broadcast(NewAxis)?, self.1.broadcast(NewAxis)?))
     }
 }
@@ -581,17 +750,17 @@ impl<D1: BroadcastNoAlias<NewAxis>, D2: BroadcastNoAlias<NewAxis>> BroadcastNoAl
 {
 }
 
-impl<E1, E2> Broadcast<(E1, E2)> for ()
+impl<E1, E2> BroadcastShape<(E1, E2)> for ()
 where
-    NewAxis: Broadcast<E1>,
-    NewAxis: Broadcast<E2>,
+    NewAxis: BroadcastDim<E1>,
+    NewAxis: BroadcastDim<E2>,
 {
     type Output = (
-        <NewAxis as Broadcast<E1>>::Output,
-        <NewAxis as Broadcast<E2>>::Output,
+        <NewAxis as BroadcastDim<E1>>::Output,
+        <NewAxis as BroadcastDim<E2>>::Output,
     );
 
-    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2)) -> Option<Self::Output> {
         Some((NewAxis.broadcast(other.0)?, NewAxis.broadcast(other.1)?))
     }
 }
@@ -602,10 +771,10 @@ where
 {
 }
 
-impl<D1: Broadcast<NewAxis>, D2: Broadcast<E1>, E1> Broadcast<(E1,)> for (D1, D2) {
+impl<D1: BroadcastDim<NewAxis>, D2: BroadcastDim<E1>, E1> BroadcastShape<(E1,)> for (D1, D2) {
     type Output = (D1::Output, D2::Output);
 
-    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1,)) -> Option<Self::Output> {
         Some((self.0.broadcast(NewAxis)?, self.1.broadcast(other.0)?))
     }
 }
@@ -614,13 +783,13 @@ impl<D1: BroadcastNoAlias<NewAxis>, D2: BroadcastNoAlias<E1>, E1> BroadcastNoAli
 {
 }
 
-impl<D1: Broadcast<E2>, E1, E2> Broadcast<(E1, E2)> for (D1,)
+impl<D1: BroadcastDim<E2>, E1, E2> BroadcastShape<(E1, E2)> for (D1,)
 where
-    NewAxis: Broadcast<E1>,
+    NewAxis: BroadcastDim<E1>,
 {
-    type Output = (<NewAxis as Broadcast<E1>>::Output, D1::Output);
+    type Output = (<NewAxis as BroadcastDim<E1>>::Output, D1::Output);
 
-    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2)) -> Option<Self::Output> {
         Some((NewAxis.broadcast(other.0)?, self.0.broadcast(other.1)?))
     }
 }
@@ -629,10 +798,10 @@ impl<D1: BroadcastNoAlias<E2>, E1, E2> BroadcastNoAlias<(E1, E2)> for (D1,) wher
 {
 }
 
-impl<D1: Broadcast<E1>, D2: Broadcast<E2>, E1, E2> Broadcast<(E1, E2)> for (D1, D2) {
+impl<D1: BroadcastDim<E1>, D2: BroadcastDim<E2>, E1, E2> BroadcastShape<(E1, E2)> for (D1, D2) {
     type Output = (D1::Output, D2::Output);
 
-    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2)) -> Option<Self::Output> {
         Some((self.0.broadcast(other.0)?, self.1.broadcast(other.1)?))
     }
 }
@@ -721,12 +890,12 @@ impl<D1: Dim + cmp::PartialEq<E1>, E1: Dim> ShapeEq<(E1, NewAxis, NewAxis)>
     }
 }
 
-impl<D1: Broadcast<NewAxis>, D2: Broadcast<NewAxis>, D3: Broadcast<NewAxis>> Broadcast<()>
-    for (D1, D2, D3)
+impl<D1: BroadcastDim<NewAxis>, D2: BroadcastDim<NewAxis>, D3: BroadcastDim<NewAxis>>
+    BroadcastShape<()> for (D1, D2, D3)
 {
     type Output = (D1::Output, D2::Output, D3::Output);
 
-    fn broadcast(self, _other: ()) -> Option<Self::Output> {
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
         Some((
             self.0.broadcast(NewAxis)?,
             self.1.broadcast(NewAxis)?,
@@ -735,26 +904,26 @@ impl<D1: Broadcast<NewAxis>, D2: Broadcast<NewAxis>, D3: Broadcast<NewAxis>> Bro
     }
 }
 impl<
-        D1: BroadcastNoAlias<NewAxis>,
-        D2: BroadcastNoAlias<NewAxis>,
-        D3: BroadcastNoAlias<NewAxis>,
-    > BroadcastNoAlias<()> for (D1, D2, D3)
+        D1: BroadcastDimNoAlias<NewAxis>,
+        D2: BroadcastDimNoAlias<NewAxis>,
+        D3: BroadcastDimNoAlias<NewAxis>,
+    > BroadcastShapeNoAlias<()> for (D1, D2, D3)
 {
 }
 
-impl<E1, E2, E3> Broadcast<(E1, E2, E3)> for ()
+impl<E1, E2, E3> BroadcastShape<(E1, E2, E3)> for ()
 where
-    NewAxis: Broadcast<E1>,
-    NewAxis: Broadcast<E2>,
-    NewAxis: Broadcast<E3>,
+    NewAxis: BroadcastDim<E1>,
+    NewAxis: BroadcastDim<E2>,
+    NewAxis: BroadcastDim<E3>,
 {
     type Output = (
-        <NewAxis as Broadcast<E1>>::Output,
-        <NewAxis as Broadcast<E2>>::Output,
-        <NewAxis as Broadcast<E3>>::Output,
+        <NewAxis as BroadcastDim<E1>>::Output,
+        <NewAxis as BroadcastDim<E2>>::Output,
+        <NewAxis as BroadcastDim<E3>>::Output,
     );
 
-    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2, E3)) -> Option<Self::Output> {
         Some((
             NewAxis.broadcast(other.0)?,
             NewAxis.broadcast(other.1)?,
@@ -771,12 +940,12 @@ where
 {
 }
 
-impl<D1: Broadcast<NewAxis>, D2: Broadcast<NewAxis>, D3: Broadcast<E1>, E1> Broadcast<(E1,)>
-    for (D1, D2, D3)
+impl<D1: BroadcastDim<NewAxis>, D2: BroadcastDim<NewAxis>, D3: BroadcastDim<E1>, E1>
+    BroadcastShape<(E1,)> for (D1, D2, D3)
 {
     type Output = (D1::Output, D2::Output, D3::Output);
 
-    fn broadcast(self, other: (E1,)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1,)) -> Option<Self::Output> {
         Some((
             self.0.broadcast(NewAxis)?,
             self.1.broadcast(NewAxis)?,
@@ -793,18 +962,18 @@ impl<
 {
 }
 
-impl<D1: Broadcast<E3>, E1, E2, E3> Broadcast<(E1, E2, E3)> for (D1,)
+impl<D1: BroadcastDim<E3>, E1, E2, E3> BroadcastShape<(E1, E2, E3)> for (D1,)
 where
-    NewAxis: Broadcast<E1>,
-    NewAxis: Broadcast<E2>,
+    NewAxis: BroadcastDim<E1>,
+    NewAxis: BroadcastDim<E2>,
 {
     type Output = (
-        <NewAxis as Broadcast<E1>>::Output,
-        <NewAxis as Broadcast<E2>>::Output,
+        <NewAxis as BroadcastDim<E1>>::Output,
+        <NewAxis as BroadcastDim<E2>>::Output,
         D1::Output,
     );
 
-    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2, E3)) -> Option<Self::Output> {
         Some((
             NewAxis.broadcast(other.0)?,
             NewAxis.broadcast(other.1)?,
@@ -819,12 +988,12 @@ where
 {
 }
 
-impl<D1: Broadcast<NewAxis>, D2: Broadcast<E1>, D3: Broadcast<E2>, E1, E2> Broadcast<(E1, E2)>
-    for (D1, D2, D3)
+impl<D1: BroadcastDim<NewAxis>, D2: BroadcastDim<E1>, D3: BroadcastDim<E2>, E1, E2>
+    BroadcastShape<(E1, E2)> for (D1, D2, D3)
 {
     type Output = (D1::Output, D2::Output, D3::Output);
 
-    fn broadcast(self, other: (E1, E2)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2)) -> Option<Self::Output> {
         Some((
             self.0.broadcast(NewAxis)?,
             self.1.broadcast(other.0)?,
@@ -837,13 +1006,18 @@ impl<D1: BroadcastNoAlias<NewAxis>, D2: BroadcastNoAlias<E1>, D3: BroadcastNoAli
 {
 }
 
-impl<D1: Broadcast<E2>, D2: Broadcast<E3>, E1, E2, E3> Broadcast<(E1, E2, E3)> for (D1, D2)
+impl<D1: BroadcastDim<E2>, D2: BroadcastDim<E3>, E1, E2, E3> BroadcastShape<(E1, E2, E3)>
+    for (D1, D2)
 where
-    NewAxis: Broadcast<E1>,
+    NewAxis: BroadcastDim<E1>,
 {
-    type Output = (<NewAxis as Broadcast<E1>>::Output, D1::Output, D2::Output);
+    type Output = (
+        <NewAxis as BroadcastDim<E1>>::Output,
+        D1::Output,
+        D2::Output,
+    );
 
-    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2, E3)) -> Option<Self::Output> {
         Some((
             NewAxis.broadcast(other.0)?,
             self.0.broadcast(other.1)?,
@@ -858,12 +1032,12 @@ where
 {
 }
 
-impl<D1: Broadcast<E1>, D2: Broadcast<E2>, D3: Broadcast<E3>, E1, E2, E3> Broadcast<(E1, E2, E3)>
-    for (D1, D2, D3)
+impl<D1: BroadcastDim<E1>, D2: BroadcastDim<E2>, D3: BroadcastDim<E3>, E1, E2, E3>
+    BroadcastShape<(E1, E2, E3)> for (D1, D2, D3)
 {
     type Output = (D1::Output, D2::Output, D3::Output);
 
-    fn broadcast(self, other: (E1, E2, E3)) -> Option<Self::Output> {
+    fn broadcast_shape(self, other: (E1, E2, E3)) -> Option<Self::Output> {
         Some((
             self.0.broadcast(other.0)?,
             self.1.broadcast(other.1)?,
@@ -875,6 +1049,8 @@ impl<D1: BroadcastNoAlias<E1>, D2: BroadcastNoAlias<E2>, D3: BroadcastNoAlias<E3
     BroadcastNoAlias<(E1, E2, E3)> for (D1, D2, D3)
 {
 }
+
+*/
 
 /////////////////////////////////////////////
 
