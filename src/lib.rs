@@ -1,12 +1,18 @@
+mod shape_impls;
+
 use std::fmt;
 use std::marker;
 use std::ops;
 
 // Helper trait for building up fixed-length arrays
 pub trait FixedLengthArray: Sized {
-    type OneBigger;
+    type OneBigger: FixedLengthArraySplit<Self>;
 
     fn prepend(self, e: usize) -> Self::OneBigger;
+}
+
+pub trait FixedLengthArraySplit<T> {
+    fn split_first(self) -> (usize, T);
 }
 
 impl FixedLengthArray for [usize; 0] {
@@ -14,6 +20,12 @@ impl FixedLengthArray for [usize; 0] {
 
     fn prepend(self, e: usize) -> Self::OneBigger {
         [e]
+    }
+}
+
+impl FixedLengthArraySplit<[usize; 0]> for [usize; 1] {
+    fn split_first(self) -> (usize, [usize; 0]) {
+        (self[0], [])
     }
 }
 
@@ -25,11 +37,23 @@ impl FixedLengthArray for [usize; 1] {
     }
 }
 
+impl FixedLengthArraySplit<[usize; 1]> for [usize; 2] {
+    fn split_first(self) -> (usize, [usize; 1]) {
+        (self[0], [self[1]])
+    }
+}
+
 impl FixedLengthArray for [usize; 2] {
     type OneBigger = [usize; 3];
 
     fn prepend(self, e: usize) -> Self::OneBigger {
         [e, self[0], self[1]]
+    }
+}
+
+impl FixedLengthArraySplit<[usize; 2]> for [usize; 3] {
+    fn split_first(self) -> (usize, [usize; 2]) {
+        (self[0], [self[1], self[2]])
     }
 }
 
@@ -56,22 +80,20 @@ impl<const N: usize> fmt::Debug for Const<N> {
     }
 }
 
-pub trait ConvertIndex<T: Shape>: Shape {
-    fn convert_index(index: Self::Index) -> T::Index;
+pub trait IntoIndex<T: Shape>: Shape {
+    fn into_index(index: Self::Index) -> T::Index;
 }
 
-pub trait BroadcastShape<T: Shape>: Shape
-where
-    Self::Output: ConvertIndex<Self>,
-    Self::Output: ConvertIndex<T>,
+pub trait BroadcastShape<T: Shape + IntoIndex<Self::Output>>:
+    Shape + IntoIndex<Self::Output>
 {
-    type Output;
+    type Output: Shape;
 
     fn broadcast_shape(self, other: T) -> Option<Self::Output>;
 }
 
 // Marker trait for if this broadcast avoids aliasing
-pub trait BroadcastShapeNoAlias<T: Shape>: BroadcastShape<T> {}
+pub trait BroadcastShapeNoAlias<T: Shape + IntoIndex<Self::Output>>: BroadcastShape<T> {}
 
 // Broadcast
 
@@ -227,21 +249,22 @@ pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
     /// (see [Broadcast].)
     ///
     /// ```
-    /// use nada::{Const, Broadcast};
+    /// use nada::{Const, Shape};
     ///
     /// let shape1 = (Const::<2>, Const::<3>);
     /// let shape2 = (2, 3);
     /// let shape3 = (3,);
-    /// assert_eq!(shape1, shape1.shape_broadcast_fail(&shape2)); // No panic since the shapes are equal
-    /// assert_eq!(shape1, shape1.shape_broadcast_fail(&shape3)); // No panic since the shapes are compatible
+    /// let _b1 = shape1.shape_broadcast_fail(shape2); // No panic since the shapes are equal
+    /// let _b2 = shape1.shape_broadcast_fail(shape3); // No panic since the shapes are compatible
+    /// // TODO show the contents of b1 and b2
     /// ```
-    fn shape_broadcast_fail<S: Shape>(&self, other: &S)
+    fn shape_broadcast_fail<S: Shape + IntoIndex<Self::Output>>(self, other: S) -> Self::Output
     where
-        Self: ShapeEq<S>,
+        Self: BroadcastShape<S>,
     {
-        if !self.shape_eq(other) {
+        self.broadcast_shape(other).unwrap_or_else(|| {
             panic!("Shapes cannot be broadcast together: {self:?} and {other:?}");
-        }
+        })
     }
 }
 
@@ -330,6 +353,8 @@ impl<const N: usize> Index for [usize; N] {
     }
 }
 
+/*
+
 /////////////////////////////////////////////
 // Shape Implementations
 
@@ -360,8 +385,8 @@ impl BroadcastShape<()> for () {
 }
 impl BroadcastShapeNoAlias<()> for () {}
 
-impl ConvertIndex<()> for () {
-    fn convert_index(_index: [usize; 0]) -> [usize; 0] {
+impl IntoIndex<()> for () {
+    fn into_index(_index: [usize; 0]) -> [usize; 0] {
         []
     }
 }
@@ -621,6 +646,233 @@ macro_rules! impl_shape_eq_reduction {
     };
 }
 
+macro_rules! impl_into_index {
+    (,,,) => {
+        // IntoIndex<(Const<N>, ...)> for (Const<N>, ...)
+        impl<const N: usize> IntoIndex<(Const<N>,)> for (Const<N>,)
+        where
+            (Const<N>,): Shape,
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+
+        // IntoIndex<(usize, ...)> for (Const<N>, ...)
+        impl<const N: usize> IntoIndex<(usize, )> for (Const<N>,)
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+
+        // IntoIndex<(Const<N>, ...)> for (usize, ...)
+        impl<const N: usize> IntoIndex<(Const<N>,)> for (usize,)
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+
+        // IntoIndex<(usize, ...)> for (usize, ...)
+        impl IntoIndex<(usize,)> for (usize,)
+        where
+            (usize,): Shape,
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+    };
+
+    ($($An:ident)*, $($an:ident)*, $($Bn:ident)*, $($bn:ident)*) => {
+        // IntoIndex<(Const<N>, ...)> for (Const<N>, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> IntoIndex<(Const<N>, $($Bn,)*)> for (Const<N>, $($An,)*)
+        where
+            ($($An,)*): IntoIndex<($($Bn,)*)>,
+            <($($An,)*) as AsIndex>::Index: FixedLengthArray<OneBigger=Self::Index>,
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+
+        // IntoIndex<(usize, ...)> for (Const<N>, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> IntoIndex<(usize, $($Bn,)*)> for (Const<N>, $($An,)*)
+        where
+            (Const<N>, $($An,)*): Shape<Index = <(usize, $($Bn,)*) as AsIndex>::Index>,
+            (usize, $($Bn,)*): Shape,
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+
+        // IntoIndex<(Const<N>, ...)> for (usize, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> IntoIndex<(Const<N>, $($Bn,)*)> for (usize, $($An,)*)
+        where
+            (usize, $($An,)*): Shape<Index = <(Const<N>, $($Bn,)*) as AsIndex>::Index>,
+            (Const<N>, $($Bn,)*): Shape,
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+
+        // IntoIndex<(usize, ...)> for (usize, ...)
+        impl<$($An: Copy,)* $($Bn: Copy,)*> IntoIndex<(usize, $($Bn,)*)> for (usize, $($An,)*)
+        where
+            (usize, $($An,)*): Shape<Index = <(usize, $($Bn,)*) as AsIndex>::Index>,
+            (usize, $($Bn,)*): Shape,
+        {
+            fn into_index(index: Self::Index) -> Self::Index {
+                index
+            }
+        }
+
+        // IntoIndex<(Const<N>, ...)> for (NewAxis, ...)
+        impl<const N: NewAxis, $($An: Copy,)* $($Bn: Copy,)*> IntoIndex<(Const<N>, $($Bn,)*)> for (NewAxis, $($An,)*)
+        where
+            //(NewAxis, $($An,)*): Shape<Index = <(Const<N>, $($Bn,)*) as AsIndex>::Index>,
+            //(Const<N>, $($Bn,)*): Shape,
+        {
+            fn into_index(index: Self::Index) -> Self::Index::OneBigger {
+                index
+            }
+        }
+
+    };
+
+}
+
+macro_rules! impl_broadcast {
+    (,,,,,) => {
+
+        // BroadcastShape<(Const<N>, ...)> for (Const<N>, ...)
+        impl<const N: usize> BroadcastShape<(Const<N>,)> for (Const<N>,)
+        {
+            type Output = (Const<N>,);
+            fn broadcast_shape(self, _other: (Const<N>,)) -> Option<Self::Output> {
+                Some((Const, ))
+            }
+        }
+    };
+    ($($An:ident)*, $($an:ident)*, $($Bn:ident)*, $($bn:ident)*, $($Cn:ident)*, $($cn:ident)*) => {
+
+        // BroadcastShape<(Const<N>, ...)> for (Const<N>, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)* $($Cn: Copy,)*> BroadcastShape<(Const<N>, $($Bn,)*)> for (Const<N>, $($An,)*)
+        where
+            ($($An,)*): BroadcastShape<($($Bn,)*), Output = ($($Cn,)*)>,
+            ($($Bn,)*): Shape + IntoIndex<($($Cn,)*)>,
+            ($($Cn,)*): Shape,
+            (Const<N>, $($Cn,)*): Shape,
+            (Const<N>, $($An,)*): IntoIndex<(Const<N>, $($Cn,)*)>,
+            (Const<N>, $($Bn,)*): IntoIndex<(Const<N>, $($Cn,)*)>,
+        {
+            type Output = (Const<N>, $($Cn,)*);
+            fn broadcast_shape(self, other: (Const<N>, $($Bn,)*)) -> Option<Self::Output> {
+                let (_, $($an,)*) = self;
+                let (_, $($bn,)*) = other;
+                let ($($cn,)*) = ($($an,)*).broadcast_shape(($($bn,)*))?;
+                Some((Const, $($cn,)*))
+            }
+        }
+
+/*
+        // BroadcastShape<(usize, ...)> for (Const<N>, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> BroadcastShape<(usize, $($Bn,)*)> for (Const<N>, $($An,)*)
+        where
+            (Const<N>, $($An,)*): Shape<Index = <(usize, $($Bn,)*) as AsIndex>::Index>,
+            (usize, $($Bn,)*): Shape,
+            ($($An,)*): BroadcastShape<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn broadcast_shape(&self, other: &(usize, $($Bn,)*)) -> bool {
+                let &(_, $($an,)*) = self;
+                let &(e, $($bn,)*) = other;
+                N == e && ($($an,)*).broadcast_shape(&($($bn,)*))
+            }
+        }
+
+        // BroadcastShape<(NewAxis, ...)> for (Const<N>, ...)
+        impl<const N: NewAxis, $($An: Copy,)* $($Bn: Copy,)*> BroadcastShape<(NewAxis, $($Bn,)*)> for (Const<N>, $($An,)*)
+        where
+            (Const<N>, $($An,)*): Shape<Index = <(NewAxis, $($Bn,)*) as AsIndex>::Index>,
+            (NewAxis, $($Bn,)*): Shape,
+            ($($An,)*): BroadcastShape<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn broadcast_shape(&self, other: &(NewAxis, $($Bn,)*)) -> bool {
+                let &(_, $($an,)*) = self;
+                let &(_, $($bn,)*) = other;
+                ($($an,)*).broadcast_shape(&($($bn,)*))
+            }
+        }
+
+        // BroadcastShape<(Const<N>, ...)> for (usize, ...)
+        impl<const N: usize, $($An: Copy,)* $($Bn: Copy,)*> BroadcastShape<(Const<N>, $($Bn,)*)> for (usize, $($An,)*)
+        where
+            (usize, $($An,)*): Shape<Index = <(Const<N>, $($Bn,)*) as AsIndex>::Index>,
+            (Const<N>, $($Bn,)*): Shape,
+            ($($An,)*): BroadcastShape<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn broadcast_shape(&self, other: &(Const<N>, $($Bn,)*)) -> bool {
+                let &(e, $($an,)*) = self;
+                let &(_, $($bn,)*) = other;
+                e == N && ($($an,)*).broadcast_shape(&($($bn,)*))
+            }
+        }
+
+        // BroadcastShape<(usize, ...)> for (usize, ...)
+        impl<$($An: Copy,)* $($Bn: Copy,)*> BroadcastShape<(usize, $($Bn,)*)> for (usize, $($An,)*)
+        where
+            (usize, $($An,)*): Shape<Index = <(usize, $($Bn,)*) as AsIndex>::Index>,
+            (usize, $($Bn,)*): Shape,
+            ($($An,)*): BroadcastShape<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn broadcast_shape(&self, other: &(usize, $($Bn,)*)) -> bool {
+                let &(e, $($an,)*) = self;
+                let &(f, $($bn,)*) = other;
+                e == f && ($($an,)*).broadcast_shape(&($($bn,)*))
+            }
+        }
+
+        // BroadcastShape<(NewAxis, ...)> for (usize, ...)
+        impl<const N: NewAxis, $($An: Copy,)* $($Bn: Copy,)*> BroadcastShape<(NewAxis, $($Bn,)*)> for (usize, $($An,)*)
+        where
+            (usize, $($An,)*): Shape<Index = <(NewAxis, $($Bn,)*) as AsIndex>::Index>,
+            (NewAxis, $($Bn,)*): Shape,
+            ($($An,)*): BroadcastShape<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn broadcast_shape(&self, other: &(NewAxis, $($Bn,)*)) -> bool {
+                let &(e, $($an,)*) = self;
+                let &(_, $($bn,)*) = other;
+                ($($an,)*).broadcast_shape(&($($bn,)*))
+            }
+        }
+
+        // BroadcastShape<(NewAxis, ...)> for (NewAxis, ...)
+        impl<$($An: Copy,)* $($Bn: Copy,)*> BroadcastShape<(NewAxis, $($Bn,)*)> for (NewAxis, $($An,)*)
+        where
+            (NewAxis, $($An,)*): Shape<Index = <(NewAxis, $($Bn,)*) as AsIndex>::Index>,
+            (NewAxis, $($Bn,)*): Shape,
+            ($($An,)*): BroadcastShape<($($Bn,)*)>,
+            ($($Bn,)*): Shape,
+        {
+            fn broadcast_shape(&self, other: &(NewAxis, $($Bn,)*)) -> bool {
+                let &(_, $($an,)*) = self;
+                let &(_, $($bn,)*) = other;
+                ($($an,)*).broadcast_shape(&($($bn,)*))
+            }
+        }
+*/
+
+    };
+}
+
 impl_shape!(,); // 1D
 impl_shape!(A0, a0); // 2D
 impl_shape!(A0 A1, a0 a1); // 3D
@@ -631,19 +883,31 @@ impl_shape_eq!(A0, a0, B0, b0); // 2D
 impl_shape_eq!(A0 A1, a0 a1, B0 B1, b0 b1); // 3D
 impl_shape_eq!(A0 A1 A2, a0 a1 a2, B0 B1 B2, b0 b1 b2); // 4D
 
-impl_shape_eq_reduction!(,,,, NewAxis, _c0); // 1D
+impl_shape_eq_reduction!(,,,, NewAxis, _0); // 1D
 
-impl_shape_eq_reduction!(,,,, NewAxis NewAxis, _c0 _c1); // 2D
-impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis, _c0); // 2D
+impl_shape_eq_reduction!(,,,, NewAxis NewAxis, _0 _1); // 2D
+impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis, _0); // 2D
 
-impl_shape_eq_reduction!(,,,, NewAxis NewAxis NewAxis, _c0 _c1 _c2); // 3D
-impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis NewAxis, _c0 _c1); // 3D
-impl_shape_eq_reduction!(A0 A1, a0 a1, B0 B1, b0 b1, NewAxis, _c0); // 3D
+impl_shape_eq_reduction!(,,,, NewAxis NewAxis NewAxis, _0 _1 _2); // 3D
+impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis NewAxis, _0 _1); // 3D
+impl_shape_eq_reduction!(A0 A1, a0 a1, B0 B1, b0 b1, NewAxis, _0); // 3D
 
-impl_shape_eq_reduction!(,,,, NewAxis NewAxis NewAxis NewAxis, _c0 _c1 _c2 _c3); // 4D
-impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis NewAxis NewAxis, _c0 _c1 _c2); // 4D
-impl_shape_eq_reduction!(A0 A1, a0 a1, B0 B1, b0 b1, NewAxis NewAxis, _c0 _c2); // 4D
-impl_shape_eq_reduction!(A0 A1 A2, a0 a1 a2, B0 B1 B2, b0 b1 b2, NewAxis, _c0); // 4D
+impl_shape_eq_reduction!(,,,, NewAxis NewAxis NewAxis NewAxis, _0 _1 _2 _3); // 4D
+impl_shape_eq_reduction!(A0, a0, B0, b0, NewAxis NewAxis NewAxis, _0 _1 _2); // 4D
+impl_shape_eq_reduction!(A0 A1, a0 a1, B0 B1, b0 b1, NewAxis NewAxis, _0 _2); // 4D
+impl_shape_eq_reduction!(A0 A1 A2, a0 a1 a2, B0 B1 B2, b0 b1 b2, NewAxis, _0); // 4D
+
+impl_into_index!(,,,); // 1D
+impl_into_index!(A0, a0, B0, b0); // 2D
+impl_into_index!(A0 A1, a0 a1, B0 B1, b0 b1); // 3D
+impl_into_index!(A0 A1 A2, a0 a1 a2, B0 B1 B2, b0 b1 b2); // 4D
+
+impl_broadcast!(,,,,,); // 1D
+impl_broadcast!(A0, a0, B0, b0, C0, c0); // 3D
+impl_broadcast!(A0 A1, a0 a1, B0 B1, b0 b1, C0 C1, c0 c1); // 3D
+impl_broadcast!(A0 A1 A2, a0 a1 a2, B0 B1 B2, b0 b1 b2, C0 C1 C2, c0 c1 c2); // 4D
+
+*/
 
 /*
 impl<D1: BroadcastDim<NewAxis, Output: Dim>> BroadcastShape<()> for (D1,) {
