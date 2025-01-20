@@ -193,8 +193,13 @@ use crate::{AsIndex, Const, NewAxis, Shape, ShapeEq, IntoIndex, BroadcastShape};
 #print(const_generics("C", "UC"), file=sys.stderr)
 #sys.exit(1)
 
+print("n=", len(all_s), file=sys.stderr)
+print("n^2=", len(all_s)**2, file=sys.stderr)
+
 for s in all_s:
     impl_shape(s)
+
+print("//////////////////////////////")
 
 for s1 in all_s:
     for s2 in all_s:

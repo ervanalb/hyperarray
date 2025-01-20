@@ -4,6 +4,8 @@ use std::fmt;
 use std::marker;
 use std::ops;
 
+/*
+
 // Helper trait for building up fixed-length arrays
 pub trait FixedLengthArray: Sized {
     type OneBigger: FixedLengthArraySplit<Self>;
@@ -56,6 +58,8 @@ impl FixedLengthArraySplit<[usize; 2]> for [usize; 3] {
         (self[0], [self[1], self[2]])
     }
 }
+
+*/
 
 /// Represents an axis of unit length that can be broadcast to any size.
 #[derive(Default, Clone, Copy)]
@@ -162,7 +166,7 @@ pub trait AsIndex {
 /// check_same_shapes((Const::<5>, 7), (Const::<5>, Const::<6>)); // Not equal at runtime
 /// //check_same_shapes((Const::<4>, 6), (Const::<5>, Const::<6>)); // Not equal at compile time (type error)
 /// ```
-pub trait Shape: 'static + Sized + Clone + Copy + fmt::Debug + AsIndex {
+pub trait Shape: 'static + Sized + Clone + Copy + AsIndex + fmt::Debug {
     // Provided methods
 
     /// How many total elements are contained within multi-dimensional data

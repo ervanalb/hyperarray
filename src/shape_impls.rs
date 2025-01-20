@@ -100,6 +100,7 @@ impl AsIndex for ()
 }
 impl Shape for () {}
     
+//////////////////////////////
 
 impl<const N0: usize, const N1: usize, > ShapeEq<(Const<N1>, Const<N0>, )> for (Const<N1>, Const<N0>, )
 {
