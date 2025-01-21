@@ -473,6 +473,12 @@ impl<S: AsIndex> AsIndex for (S, NewAxis) {
 
 // IntoIndex
 
+impl IntoIndex<()> for () {
+    fn into_index(_index: [usize; 0]) -> [usize; 0] {
+        []
+    }
+}
+
 impl<S1: IntoIndex<S2>, S2: Shape> IntoIndex<(S2, NewAxis)> for (S1, NewAxis) {
     fn into_index(index: S1::Index) -> S2::Index {
         S1::into_index(index)
@@ -671,8 +677,230 @@ where
     }
 }
 
-/*
+// BroadcastShape
 
+impl BroadcastShape<()> for () {
+    type Output = ();
+
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+        Some(())
+    }
+}
+
+impl<S2: Shape> BroadcastShape<(S2, NewAxis)> for ()
+where
+    (): IntoIndex<(S2, NewAxis)>,
+    (S2, NewAxis): IntoIndex<(S2, NewAxis)>,
+{
+    type Output = (S2, NewAxis);
+
+    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+        Some(other)
+    }
+}
+
+impl<S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)> for ()
+where
+    (): IntoIndex<(S2, Const<N>)>,
+    (S2, Const<N>): IntoIndex<(S2, Const<N>)>,
+{
+    type Output = (S2, Const<N>);
+
+    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+        Some(other)
+    }
+}
+
+impl<S2: Shape> BroadcastShape<(S2, usize)> for ()
+where
+    (): IntoIndex<(S2, usize)>,
+    (S2, usize): IntoIndex<(S2, usize)>,
+{
+    type Output = (S2, usize);
+
+    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
+        Some(other)
+    }
+}
+
+impl<S1: Shape> BroadcastShape<()> for (S1, NewAxis)
+where
+    (S1, NewAxis): IntoIndex<(S1, NewAxis)>,
+    (): IntoIndex<(S1, NewAxis)>,
+{
+    type Output = (S1, NewAxis);
+
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+        Some(self)
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, NewAxis)> for (S1, NewAxis)
+where
+    (S1, NewAxis): IntoIndex<(S1::Output, NewAxis)>,
+    (S2, NewAxis): IntoIndex<(S1::Output, NewAxis)>,
+    S1: IntoIndex<S1::Output>,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, NewAxis);
+
+    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+        Some((self.0.broadcast_shape(other.0)?, NewAxis))
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)>
+    for (S1, NewAxis)
+where
+    (S1, NewAxis): IntoIndex<(S1::Output, Const<N>)>,
+    (S2, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S1::Output, Const<N>): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, Const<N>);
+
+    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+        Some((self.0.broadcast_shape(other.0)?, Const))
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, usize)> for (S1, NewAxis)
+where
+    (S1, NewAxis): IntoIndex<(S1::Output, usize)>,
+    (S2, usize): IntoIndex<(S1::Output, usize)>,
+    (S1::Output, usize): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, usize);
+
+    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
+        Some((self.0.broadcast_shape(other.0)?, other.1))
+    }
+}
+
+impl<S1: Shape, const N: usize> BroadcastShape<()> for (S1, Const<N>)
+where
+    (S1, Const<N>): IntoIndex<(S1, Const<N>)>,
+    (): IntoIndex<(S1, Const<N>)>,
+{
+    type Output = (S1, Const<N>);
+
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+        Some(self)
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, NewAxis)>
+    for (S1, Const<N>)
+where
+    (S1, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S2, NewAxis): IntoIndex<(S1::Output, Const<N>)>,
+    (S1::Output, Const<N>): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, Const<N>);
+
+    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+        Some((self.0.broadcast_shape(other.0)?, Const))
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)>
+    for (S1, Const<N>)
+where
+    (S1, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S2, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S1::Output, Const<N>): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, Const<N>);
+
+    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+        Some((self.0.broadcast_shape(other.0)?, Const))
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, usize)>
+    for (S1, Const<N>)
+where
+    (S1, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S2, usize): IntoIndex<(S1::Output, Const<N>)>,
+    (S1::Output, Const<N>): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, Const<N>);
+
+    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
+        if N != other.1 {
+            return None;
+        }
+        Some((self.0.broadcast_shape(other.0)?, Const))
+    }
+}
+
+impl<S1: Shape> BroadcastShape<()> for (S1, usize)
+where
+    (S1, usize): IntoIndex<(S1, usize)>,
+    (): IntoIndex<(S1, usize)>,
+{
+    type Output = (S1, usize);
+
+    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+        Some(self)
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, NewAxis)> for (S1, usize)
+where
+    (S1, usize): IntoIndex<(S1::Output, usize)>,
+    (S2, NewAxis): IntoIndex<(S1::Output, usize)>,
+    (S1::Output, usize): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, usize);
+
+    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+        Some((self.0.broadcast_shape(other.0)?, self.1))
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)>
+    for (S1, usize)
+where
+    (S1, usize): IntoIndex<(S1::Output, Const<N>)>,
+    (S2, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S1::Output, Const<N>): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, Const<N>);
+
+    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+        if self.1 != N {
+            return None;
+        }
+        Some((self.0.broadcast_shape(other.0)?, Const))
+    }
+}
+
+impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, usize)> for (S1, usize)
+where
+    (S1, usize): IntoIndex<(S1::Output, usize)>,
+    (S2, usize): IntoIndex<(S1::Output, usize)>,
+    (S1::Output, usize): Shape,
+    S2: IntoIndex<S1::Output>,
+{
+    type Output = (S1::Output, usize);
+
+    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
+        if self.1 != other.1 {
+            return None;
+        }
+        Some((self.0.broadcast_shape(other.0)?, self.1))
+    }
+}
+
+/*
+// OLD STUFF //
 // Base case-- 0D
 
 impl AsIndex for () {
