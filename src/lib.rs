@@ -1159,12 +1159,12 @@ pub struct ViewMut<'a, S: Shape, D: ?Sized> {
 }
 
 impl<'a, S: Shape, D: ?Sized> ViewMut<'a, S, D> {
-    pub fn broadcast_into_fail<S2: Shape>(self, shape: S2) -> View<'a, S2, D>
+    pub fn broadcast_into_fail<S2: Shape>(self, shape: S2) -> ViewMut<'a, S2, D>
     where
         S: BroadcastIntoNoAlias<S2>,
     {
         self.shape.broadcast_into_fail(shape);
-        View {
+        ViewMut {
             shape,
             offset: self.offset,
             strides: S::into_index(self.strides),
@@ -2016,8 +2016,8 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc_shape, Array, AsIndex, BroadcastInto, BroadcastTogether, Const, DefiniteRange,
-        IntoTarget, IntoView, IntoViewMut, NewAxis, OutTarget, Shape, ShapeEq,
+        alloc_shape, Array, AsIndex, BroadcastInto, BroadcastIntoNoAlias, BroadcastTogether, Const,
+        DefiniteRange, IntoTarget, IntoView, IntoViewMut, NewAxis, OutTarget, Shape, ShapeEq,
     };
 
     #[test]
@@ -2148,6 +2148,11 @@ mod test {
             let in1 = in1.view();
             let in2 = in2.view();
 
+            // TODO combine these 3 lines with a convenience function
+            let combined_shape = in1.shape.broadcast_together_fail(in2.shape);
+            let in1 = in1.broadcast_into_fail(combined_shape);
+            let in2 = in2.broadcast_into_fail(combined_shape);
+
             in1.into_iter()
                 .zip(in2.into_iter())
                 .map(|(a, b)| a * b)
@@ -2162,6 +2167,73 @@ mod test {
         };
 
         sum_prod(&a, &a);
+    }
+
+    #[test]
+    fn test_add() {
+        fn add<
+            A: IntoView<Shape: BroadcastInto<S2>, Data = [f32]>,
+            B: IntoView<Shape: BroadcastInto<S2>, Data = [f32]>,
+            O: IntoTarget<Shape: BroadcastIntoNoAlias<S2>, Data = [f32]>,
+            S1: Shape,
+            S2: Shape,
+        >(
+            a: &A,
+            b: &B,
+            out: O,
+        ) -> <O::Target as OutTarget>::Output
+        where
+            A::Shape: BroadcastTogether<B::Shape, Output = S1>,
+            S1: BroadcastTogether<O::Shape, Output = S2>,
+            B::Shape: BroadcastInto<S1>, // TODO avoid stating this bound?
+        {
+            let a = a.view();
+            let b = b.view();
+            let combined_shape = a.shape.broadcast_together_fail(b.shape);
+
+            // BUILD could take in multiple shapes and broadcast them together??
+
+            let mut out_target = out.build(); // combined_shape
+
+            let out = out_target.view_mut();
+            let combined_shape = combined_shape.broadcast_together_fail(out.shape);
+            let a = a.broadcast_into_fail(combined_shape);
+            let b = b.broadcast_into_fail(combined_shape);
+            let mut out = out.broadcast_into_fail(combined_shape);
+
+            // ZIP could perform the broadcast??
+
+            for (out, (a, b)) in (&mut out).into_iter().zip(a.into_iter().zip(b.into_iter())) {
+                *out = a + b;
+            }
+
+            out_target.output()
+        }
+
+        let a = Array {
+            shape: ((), Const::<2>),
+            strides: ((), Const::<2>).default_strides(),
+            offset: 0,
+            data: vec![1., 2.],
+        };
+
+        let b = Array {
+            shape: (((), Const::<2>), NewAxis),
+            strides: (((), Const::<2>), NewAxis).default_strides(),
+            offset: 0,
+            data: vec![10., 20.],
+        };
+
+        let mut c = Array {
+            shape: ((((), Const::<2>), Const::<2>), Const::<2>),
+            strides: ((((), Const::<2>), Const::<2>), Const::<2>).default_strides(),
+            offset: 0,
+            data: vec![0.; 8],
+        };
+
+        add(&a, &b, &mut c);
+
+        assert_eq!(c.data, [11., 12., 21., 22., 11., 12., 21., 22.]);
     }
 
     #[test]
