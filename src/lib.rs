@@ -82,20 +82,26 @@ impl<const N: usize> fmt::Debug for Const<N> {
     }
 }
 
-pub trait IntoIndex<T: Shape>: Shape {
+pub trait BroadcastInto<T: Shape>: Shape {
+    fn can_broadcast_into(self, other: T) -> bool;
     fn into_index(index: Self::Index) -> T::Index;
 }
 
-pub trait BroadcastShape<T: Shape + IntoIndex<Self::Output>>:
-    Shape + IntoIndex<Self::Output>
+pub trait BroadcastIntoNoAlias<T: Shape>: BroadcastInto<T> {}
+
+pub trait BroadcastTogether<T: Shape + BroadcastInto<Self::Output>>:
+    Shape + BroadcastInto<Self::Output>
 {
     type Output: Shape;
 
-    fn broadcast_shape(self, other: T) -> Option<Self::Output>;
+    fn broadcast_together(self, other: T) -> Option<Self::Output>;
 }
 
 // Marker trait for if this broadcast avoids aliasing
-pub trait BroadcastShapeNoAlias<T: Shape + IntoIndex<Self::Output>>: BroadcastShape<T> {}
+pub trait BroadcastShapeNoAlias<T: Shape + BroadcastInto<Self::Output>>:
+    BroadcastTogether<T>
+{
+}
 
 // Broadcast
 
@@ -248,7 +254,6 @@ pub trait Shape: 'static + Sized + Clone + Copy + AsIndex + fmt::Debug {
     ///
     /// Fails to compile if the two shape types could never be broadcast together,
     /// such as `(Const::<2>,)` and `(Const::<3>,)`
-    /// (see [Broadcast].)
     ///
     /// ```
     /// use nada::{Const, Shape};
@@ -256,17 +261,44 @@ pub trait Shape: 'static + Sized + Clone + Copy + AsIndex + fmt::Debug {
     /// let shape1 = (Const::<2>, Const::<3>);
     /// let shape2 = (2, 3);
     /// let shape3 = (3,);
-    /// let _b1 = shape1.shape_broadcast_fail(shape2); // No panic since the shapes are equal
-    /// let _b2 = shape1.shape_broadcast_fail(shape3); // No panic since the shapes are compatible
+    /// let _b1 = shape1.broadcast_together_fail(shape2); // No panic since the shapes are equal
+    /// let _b2 = shape1.broadcast_together_fail(shape3); // No panic since the shapes are compatible
     /// // TODO show the contents of b1 and b2
     /// ```
-    fn shape_broadcast_fail<S: Shape + IntoIndex<Self::Output>>(self, other: S) -> Self::Output
+    fn broadcast_together_fail<S: Shape + BroadcastInto<Self::Output>>(
+        self,
+        other: S,
+    ) -> Self::Output
     where
-        Self: BroadcastShape<S>,
+        Self: BroadcastTogether<S>,
     {
-        self.broadcast_shape(other).unwrap_or_else(|| {
+        self.broadcast_together(other).unwrap_or_else(|| {
             panic!("Shapes cannot be broadcast together: {self:?} and {other:?}");
         })
+    }
+
+    /// Tries to broadcast one shape into another, and panics if it fails.
+    ///
+    /// Fails to compile if the shape could never be broadcast into the given one,
+    /// such as `(Const::<2>,)` and `(Const::<3>,)`
+    ///
+    /// ```
+    /// use nada::{Const, Shape};
+    ///
+    /// let shape1 = (Const::<2>, Const::<3>);
+    /// let shape2 = (2, 3);
+    /// let shape3 = (10, 2, 3);
+    /// let _b1 = shape1.broadcast_into_fail(shape2); // No panic since the shapes are equal
+    /// let _b2 = shape1.broadcast_into_fail(shape3); // No panic since the shapes are compatible
+    /// // TODO show the contents of b1 and b2
+    /// ```
+    fn broadcast_into_fail<S: Shape>(self, other: S)
+    where
+        Self: BroadcastInto<S>,
+    {
+        if !self.can_broadcast_into(other) {
+            panic!("Shape {self:?} cannot be broadcast into shape {other:?}");
+        }
     }
 }
 
@@ -471,80 +503,140 @@ impl<S: AsIndex> AsIndex for (S, NewAxis) {
     }
 }
 
-// IntoIndex
+// BroadcastInto / BroadcastIntoNoAlias
 
-impl IntoIndex<()> for () {
+impl BroadcastInto<()> for () {
+    fn can_broadcast_into(self, _other: ()) -> bool {
+        true
+    }
+
     fn into_index(_index: [usize; 0]) -> [usize; 0] {
         []
     }
 }
+impl BroadcastIntoNoAlias<()> for () {}
 
-impl<S1: IntoIndex<S2>, S2: Shape> IntoIndex<(S2, NewAxis)> for (S1, NewAxis) {
+impl<S1: BroadcastInto<S2>, S2: Shape> BroadcastInto<(S2, NewAxis)> for (S1, NewAxis) {
+    fn can_broadcast_into(self, other: (S2, NewAxis)) -> bool {
+        self.0.can_broadcast_into(other.0)
+    }
+
     fn into_index(index: S1::Index) -> S2::Index {
         S1::into_index(index)
     }
 }
-
-impl<S2: Shape> IntoIndex<(S2, NewAxis)> for ()
-where
-    ((), NewAxis): IntoIndex<S2>,
+impl<S1: BroadcastIntoNoAlias<S2>, S2: Shape> BroadcastIntoNoAlias<(S2, NewAxis)>
+    for (S1, NewAxis)
 {
+}
+
+impl<S2: Shape> BroadcastInto<(S2, NewAxis)> for ()
+where
+    (): BroadcastInto<S2>,
+{
+    fn can_broadcast_into(self, other: (S2, NewAxis)) -> bool {
+        ().can_broadcast_into(other.0)
+    }
+
     fn into_index(index: [usize; 0]) -> S2::Index {
-        <((), NewAxis) as IntoIndex<S2>>::into_index(index)
+        <() as BroadcastInto<S2>>::into_index(index)
     }
 }
+impl<S2: Shape> BroadcastIntoNoAlias<(S2, NewAxis)> for () where (): BroadcastInto<S2> {}
 
-impl<S1: Shape<Index = [usize; 0]>> IntoIndex<()> for (S1, NewAxis) {
-    fn into_index(_index: [usize; 0]) -> [usize; 0] {
-        []
+impl<S1: Shape + BroadcastInto<()>> BroadcastInto<()> for (S1, NewAxis) {
+    fn can_broadcast_into(self, _other: ()) -> bool {
+        self.0.can_broadcast_into(())
+    }
+    fn into_index(index: S1::Index) -> <() as AsIndex>::Index {
+        S1::into_index(index)
     }
 }
+impl<S1: Shape + BroadcastIntoNoAlias<()>> BroadcastIntoNoAlias<()> for (S1, NewAxis) {}
 
-impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for (S1, NewAxis)
+impl<S1: BroadcastInto<S2>, S2: Shape, const N: usize> BroadcastInto<(S2, Const<N>)>
+    for (S1, NewAxis)
 where
     <S1 as AsIndex>::Index: FLA,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+    fn can_broadcast_into(self, other: (S2, Const<N>)) -> bool {
+        self.0.can_broadcast_into(other.0)
+    }
     fn into_index(index: <S1 as AsIndex>::Index) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
         S1::into_index(index).append(0)
     }
 }
+//impl<S1: BroadcastInto<S2>, S2: Shape, const N: usize> BroadcastIntoNoAlias<(S2, Const<N>)>
+//    for (S1, NewAxis)
+//where
+//    <S1 as AsIndex>::Index: FLA,
+//    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+//{ ! }
 
-impl<S1: IntoIndex<S2>, S2: Shape> IntoIndex<(S2, usize)> for (S1, NewAxis)
+impl<S1: BroadcastInto<S2>, S2: Shape> BroadcastInto<(S2, usize)> for (S1, NewAxis)
 where
     <S1 as AsIndex>::Index: FLA,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+    fn can_broadcast_into(self, other: (S2, usize)) -> bool {
+        self.0.can_broadcast_into(other.0)
+    }
     fn into_index(index: <S1 as AsIndex>::Index) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
         S1::into_index(index).append(0)
     }
 }
+//impl<S1: BroadcastIntoNoAlias<S2>, S2: Shape> BroadcastIntoNoAlias<(S2, usize)> for (S1, NewAxis)
+//where
+//    <S1 as AsIndex>::Index: FLA,
+//    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+//{ ! }
 
-impl<S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for ()
+impl<S2: Shape, const N: usize> BroadcastInto<(S2, Const<N>)> for ()
 where
-    ((), NewAxis): IntoIndex<S2>,
+    (): BroadcastInto<S2>,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+    fn can_broadcast_into(self, other: (S2, Const<N>)) -> bool {
+        ().can_broadcast_into(other.0)
+    }
     fn into_index(index: [usize; 0]) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
-        <((), NewAxis) as IntoIndex<S2>>::into_index(index).append(0)
+        <() as BroadcastInto<S2>>::into_index(index).append(0)
     }
 }
+//impl<S2: Shape, const N: usize> BroadcastIntoNoAlias<(S2, Const<N>)> for ()
+//where
+//    (): BroadcastIntoNoAlias<S2>,
+//    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+//{ ! }
 
-impl<S2: Shape> IntoIndex<(S2, usize)> for ()
+impl<S2: Shape> BroadcastInto<(S2, usize)> for ()
 where
-    ((), NewAxis): IntoIndex<S2>,
+    (): BroadcastInto<S2>,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+    fn can_broadcast_into(self, other: (S2, usize)) -> bool {
+        ().can_broadcast_into(other.0)
+    }
     fn into_index(index: [usize; 0]) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
-        <((), NewAxis) as IntoIndex<S2>>::into_index(index).append(0)
+        <() as BroadcastInto<S2>>::into_index(index).append(0)
     }
 }
+//impl<S2: Shape> BroadcastIntoNoAlias<(S2, usize)> for ()
+//where
+//    (): BroadcastIntoNoAlias<S2>,
+//    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+//{ ! }
 
-impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for (S1, Const<N>)
+impl<S1: BroadcastInto<S2>, S2: Shape, const N: usize> BroadcastInto<(S2, Const<N>)>
+    for (S1, Const<N>)
 where
     <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+    fn can_broadcast_into(self, other: (S2, Const<N>)) -> bool {
+        self.0.can_broadcast_into(other.0)
+    }
     fn into_index(
         index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
     ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
@@ -552,12 +644,22 @@ where
         S1::into_index(index_rest).append(index_last)
     }
 }
-
-impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for (S1, usize)
+impl<S1: BroadcastIntoNoAlias<S2>, S2: Shape, const N: usize> BroadcastIntoNoAlias<(S2, Const<N>)>
+    for (S1, Const<N>)
 where
     <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+}
+
+impl<S1: BroadcastInto<S2>, S2: Shape, const N: usize> BroadcastInto<(S2, Const<N>)> for (S1, usize)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn can_broadcast_into(self, other: (S2, Const<N>)) -> bool {
+        self.0.can_broadcast_into(other.0) && self.1 == N
+    }
     fn into_index(
         index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
     ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
@@ -565,12 +667,22 @@ where
         S1::into_index(index_rest).append(index_last)
     }
 }
-
-impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, usize)> for (S1, Const<N>)
+impl<S1: BroadcastIntoNoAlias<S2>, S2: Shape, const N: usize> BroadcastIntoNoAlias<(S2, Const<N>)>
+    for (S1, usize)
 where
     <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+}
+
+impl<S1: BroadcastInto<S2>, S2: Shape, const N: usize> BroadcastInto<(S2, usize)> for (S1, Const<N>)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn can_broadcast_into(self, other: (S2, usize)) -> bool {
+        self.0.can_broadcast_into(other.0) && N == other.1
+    }
     fn into_index(
         index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
     ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
@@ -578,18 +690,34 @@ where
         S1::into_index(index_rest).append(index_last)
     }
 }
-
-impl<S1: IntoIndex<S2>, S2: Shape> IntoIndex<(S2, usize)> for (S1, usize)
+impl<S1: BroadcastIntoNoAlias<S2>, S2: Shape, const N: usize> BroadcastIntoNoAlias<(S2, usize)>
+    for (S1, Const<N>)
 where
     <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
     <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
 {
+}
+
+impl<S1: BroadcastInto<S2>, S2: Shape> BroadcastInto<(S2, usize)> for (S1, usize)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn can_broadcast_into(self, other: (S2, usize)) -> bool {
+        self.0.can_broadcast_into(other.0) && self.1 == other.1
+    }
     fn into_index(
         index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
     ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
         let (index_rest, index_last) = index.split();
         S1::into_index(index_rest).append(index_last)
     }
+}
+impl<S1: BroadcastIntoNoAlias<S2>, S2: Shape> BroadcastIntoNoAlias<(S2, usize)> for (S1, usize)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
 }
 
 // ShapeEq
@@ -677,225 +805,225 @@ where
     }
 }
 
-// BroadcastShape
+// BroadcastTogether / BroadcastTogetherNoAlias
 
-impl BroadcastShape<()> for () {
+impl BroadcastTogether<()> for () {
     type Output = ();
 
-    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+    fn broadcast_together(self, _other: ()) -> Option<Self::Output> {
         Some(())
     }
 }
 
-impl<S2: Shape> BroadcastShape<(S2, NewAxis)> for ()
+impl<S2: Shape> BroadcastTogether<(S2, NewAxis)> for ()
 where
-    (): IntoIndex<(S2, NewAxis)>,
-    (S2, NewAxis): IntoIndex<(S2, NewAxis)>,
+    (): BroadcastInto<(S2, NewAxis)>,
+    (S2, NewAxis): BroadcastInto<(S2, NewAxis)>,
 {
     type Output = (S2, NewAxis);
 
-    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+    fn broadcast_together(self, other: (S2, NewAxis)) -> Option<Self::Output> {
         Some(other)
     }
 }
 
-impl<S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)> for ()
+impl<S2: Shape, const N: usize> BroadcastTogether<(S2, Const<N>)> for ()
 where
-    (): IntoIndex<(S2, Const<N>)>,
-    (S2, Const<N>): IntoIndex<(S2, Const<N>)>,
+    (): BroadcastInto<(S2, Const<N>)>,
+    (S2, Const<N>): BroadcastInto<(S2, Const<N>)>,
 {
     type Output = (S2, Const<N>);
 
-    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+    fn broadcast_together(self, other: (S2, Const<N>)) -> Option<Self::Output> {
         Some(other)
     }
 }
 
-impl<S2: Shape> BroadcastShape<(S2, usize)> for ()
+impl<S2: Shape> BroadcastTogether<(S2, usize)> for ()
 where
-    (): IntoIndex<(S2, usize)>,
-    (S2, usize): IntoIndex<(S2, usize)>,
+    (): BroadcastInto<(S2, usize)>,
+    (S2, usize): BroadcastInto<(S2, usize)>,
 {
     type Output = (S2, usize);
 
-    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
+    fn broadcast_together(self, other: (S2, usize)) -> Option<Self::Output> {
         Some(other)
     }
 }
 
-impl<S1: Shape> BroadcastShape<()> for (S1, NewAxis)
+impl<S1: Shape> BroadcastTogether<()> for (S1, NewAxis)
 where
-    (S1, NewAxis): IntoIndex<(S1, NewAxis)>,
-    (): IntoIndex<(S1, NewAxis)>,
+    (S1, NewAxis): BroadcastInto<(S1, NewAxis)>,
+    (): BroadcastInto<(S1, NewAxis)>,
 {
     type Output = (S1, NewAxis);
 
-    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+    fn broadcast_together(self, _other: ()) -> Option<Self::Output> {
         Some(self)
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, NewAxis)> for (S1, NewAxis)
+impl<S1: BroadcastTogether<S2>, S2: Shape> BroadcastTogether<(S2, NewAxis)> for (S1, NewAxis)
 where
-    (S1, NewAxis): IntoIndex<(S1::Output, NewAxis)>,
-    (S2, NewAxis): IntoIndex<(S1::Output, NewAxis)>,
-    S1: IntoIndex<S1::Output>,
-    S2: IntoIndex<S1::Output>,
+    (S1, NewAxis): BroadcastInto<(S1::Output, NewAxis)>,
+    (S2, NewAxis): BroadcastInto<(S1::Output, NewAxis)>,
+    S1: BroadcastInto<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, NewAxis);
 
-    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
-        Some((self.0.broadcast_shape(other.0)?, NewAxis))
+    fn broadcast_together(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+        Some((self.0.broadcast_together(other.0)?, NewAxis))
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)>
+impl<S1: BroadcastTogether<S2>, S2: Shape, const N: usize> BroadcastTogether<(S2, Const<N>)>
     for (S1, NewAxis)
 where
-    (S1, NewAxis): IntoIndex<(S1::Output, Const<N>)>,
-    (S2, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S1, NewAxis): BroadcastInto<(S1::Output, Const<N>)>,
+    (S2, Const<N>): BroadcastInto<(S1::Output, Const<N>)>,
     (S1::Output, Const<N>): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, Const<N>);
 
-    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
-        Some((self.0.broadcast_shape(other.0)?, Const))
+    fn broadcast_together(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+        Some((self.0.broadcast_together(other.0)?, Const))
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, usize)> for (S1, NewAxis)
+impl<S1: BroadcastTogether<S2>, S2: Shape> BroadcastTogether<(S2, usize)> for (S1, NewAxis)
 where
-    (S1, NewAxis): IntoIndex<(S1::Output, usize)>,
-    (S2, usize): IntoIndex<(S1::Output, usize)>,
+    (S1, NewAxis): BroadcastInto<(S1::Output, usize)>,
+    (S2, usize): BroadcastInto<(S1::Output, usize)>,
     (S1::Output, usize): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, usize);
 
-    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
-        Some((self.0.broadcast_shape(other.0)?, other.1))
+    fn broadcast_together(self, other: (S2, usize)) -> Option<Self::Output> {
+        Some((self.0.broadcast_together(other.0)?, other.1))
     }
 }
 
-impl<S1: Shape, const N: usize> BroadcastShape<()> for (S1, Const<N>)
+impl<S1: Shape, const N: usize> BroadcastTogether<()> for (S1, Const<N>)
 where
-    (S1, Const<N>): IntoIndex<(S1, Const<N>)>,
-    (): IntoIndex<(S1, Const<N>)>,
+    (S1, Const<N>): BroadcastInto<(S1, Const<N>)>,
+    (): BroadcastInto<(S1, Const<N>)>,
 {
     type Output = (S1, Const<N>);
 
-    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+    fn broadcast_together(self, _other: ()) -> Option<Self::Output> {
         Some(self)
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, NewAxis)>
+impl<S1: BroadcastTogether<S2>, S2: Shape, const N: usize> BroadcastTogether<(S2, NewAxis)>
     for (S1, Const<N>)
 where
-    (S1, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
-    (S2, NewAxis): IntoIndex<(S1::Output, Const<N>)>,
+    (S1, Const<N>): BroadcastInto<(S1::Output, Const<N>)>,
+    (S2, NewAxis): BroadcastInto<(S1::Output, Const<N>)>,
     (S1::Output, Const<N>): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, Const<N>);
 
-    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
-        Some((self.0.broadcast_shape(other.0)?, Const))
+    fn broadcast_together(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+        Some((self.0.broadcast_together(other.0)?, Const))
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)>
+impl<S1: BroadcastTogether<S2>, S2: Shape, const N: usize> BroadcastTogether<(S2, Const<N>)>
     for (S1, Const<N>)
 where
-    (S1, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
-    (S2, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S1, Const<N>): BroadcastInto<(S1::Output, Const<N>)>,
+    (S2, Const<N>): BroadcastInto<(S1::Output, Const<N>)>,
     (S1::Output, Const<N>): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, Const<N>);
 
-    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
-        Some((self.0.broadcast_shape(other.0)?, Const))
+    fn broadcast_together(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+        Some((self.0.broadcast_together(other.0)?, Const))
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, usize)>
+impl<S1: BroadcastTogether<S2>, S2: Shape, const N: usize> BroadcastTogether<(S2, usize)>
     for (S1, Const<N>)
 where
-    (S1, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
-    (S2, usize): IntoIndex<(S1::Output, Const<N>)>,
+    (S1, Const<N>): BroadcastInto<(S1::Output, Const<N>)>,
+    (S2, usize): BroadcastInto<(S1::Output, Const<N>)>,
     (S1::Output, Const<N>): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, Const<N>);
 
-    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
+    fn broadcast_together(self, other: (S2, usize)) -> Option<Self::Output> {
         if N != other.1 {
             return None;
         }
-        Some((self.0.broadcast_shape(other.0)?, Const))
+        Some((self.0.broadcast_together(other.0)?, Const))
     }
 }
 
-impl<S1: Shape> BroadcastShape<()> for (S1, usize)
+impl<S1: Shape> BroadcastTogether<()> for (S1, usize)
 where
-    (S1, usize): IntoIndex<(S1, usize)>,
-    (): IntoIndex<(S1, usize)>,
+    (S1, usize): BroadcastInto<(S1, usize)>,
+    (): BroadcastInto<(S1, usize)>,
 {
     type Output = (S1, usize);
 
-    fn broadcast_shape(self, _other: ()) -> Option<Self::Output> {
+    fn broadcast_together(self, _other: ()) -> Option<Self::Output> {
         Some(self)
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, NewAxis)> for (S1, usize)
+impl<S1: BroadcastTogether<S2>, S2: Shape> BroadcastTogether<(S2, NewAxis)> for (S1, usize)
 where
-    (S1, usize): IntoIndex<(S1::Output, usize)>,
-    (S2, NewAxis): IntoIndex<(S1::Output, usize)>,
+    (S1, usize): BroadcastInto<(S1::Output, usize)>,
+    (S2, NewAxis): BroadcastInto<(S1::Output, usize)>,
     (S1::Output, usize): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, usize);
 
-    fn broadcast_shape(self, other: (S2, NewAxis)) -> Option<Self::Output> {
-        Some((self.0.broadcast_shape(other.0)?, self.1))
+    fn broadcast_together(self, other: (S2, NewAxis)) -> Option<Self::Output> {
+        Some((self.0.broadcast_together(other.0)?, self.1))
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape, const N: usize> BroadcastShape<(S2, Const<N>)>
+impl<S1: BroadcastTogether<S2>, S2: Shape, const N: usize> BroadcastTogether<(S2, Const<N>)>
     for (S1, usize)
 where
-    (S1, usize): IntoIndex<(S1::Output, Const<N>)>,
-    (S2, Const<N>): IntoIndex<(S1::Output, Const<N>)>,
+    (S1, usize): BroadcastInto<(S1::Output, Const<N>)>,
+    (S2, Const<N>): BroadcastInto<(S1::Output, Const<N>)>,
     (S1::Output, Const<N>): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, Const<N>);
 
-    fn broadcast_shape(self, other: (S2, Const<N>)) -> Option<Self::Output> {
+    fn broadcast_together(self, other: (S2, Const<N>)) -> Option<Self::Output> {
         if self.1 != N {
             return None;
         }
-        Some((self.0.broadcast_shape(other.0)?, Const))
+        Some((self.0.broadcast_together(other.0)?, Const))
     }
 }
 
-impl<S1: BroadcastShape<S2>, S2: Shape> BroadcastShape<(S2, usize)> for (S1, usize)
+impl<S1: BroadcastTogether<S2>, S2: Shape> BroadcastTogether<(S2, usize)> for (S1, usize)
 where
-    (S1, usize): IntoIndex<(S1::Output, usize)>,
-    (S2, usize): IntoIndex<(S1::Output, usize)>,
+    (S1, usize): BroadcastInto<(S1::Output, usize)>,
+    (S2, usize): BroadcastInto<(S1::Output, usize)>,
     (S1::Output, usize): Shape,
-    S2: IntoIndex<S1::Output>,
+    S2: BroadcastInto<S1::Output>,
 {
     type Output = (S1::Output, usize);
 
-    fn broadcast_shape(self, other: (S2, usize)) -> Option<Self::Output> {
+    fn broadcast_together(self, other: (S2, usize)) -> Option<Self::Output> {
         if self.1 != other.1 {
             return None;
         }
-        Some((self.0.broadcast_shape(other.0)?, self.1))
+        Some((self.0.broadcast_together(other.0)?, self.1))
     }
 }
 
@@ -2080,21 +2208,23 @@ pub trait IntoView<D: ?Sized>: IntoViewWithShape<Self::NativeShape, D> {
     fn view(&self) -> View<Self::NativeShape, D>;
 }
 
-impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>>
+impl<S: Shape, S2: Shape + BroadcastInto<S>, D: ?Sized, D2: ops::Deref<Target = D>>
     IntoViewWithShape<S, D> for Array<S2, D2>
 {
     fn view_with_shape(&self, shape: S) -> View<S, D> {
-        self.shape.shape_mismatch_fail(&shape);
+        self.shape.broadcast_into_fail(shape);
         View {
             shape,
             offset: self.offset,
-            strides: self.strides.into(),
+            strides: S2::into_index(self.strides),
             data: &self.data,
         }
     }
 }
 
-impl<S: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>> IntoView<D> for Array<S, D2> {
+impl<S: Shape + BroadcastInto<S>, D: ?Sized, D2: ops::Deref<Target = D>> IntoView<D>
+    for Array<S, D2>
+{
     type NativeShape = S;
 
     fn view(&self) -> View<S, D> {
@@ -2107,19 +2237,21 @@ impl<S: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>> IntoView<D> f
     }
 }
 
-impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewWithShape<S, D> for View<'_, S2, D> {
+impl<S: Shape, S2: Shape + BroadcastInto<S>, D: ?Sized> IntoViewWithShape<S, D>
+    for View<'_, S2, D>
+{
     fn view_with_shape(&self, shape: S) -> View<S, D> {
-        self.shape.shape_mismatch_fail(&shape);
+        self.shape.broadcast_into_fail(shape);
         View {
             shape,
             offset: self.offset,
-            strides: self.strides.into(),
+            strides: S2::into_index(self.strides),
             data: self.data,
         }
     }
 }
 
-impl<S: Shape + ShapeEq<S>, D: ?Sized> IntoView<D> for View<'_, S, D> {
+impl<S: Shape + BroadcastInto<S>, D: ?Sized> IntoView<D> for View<'_, S, D> {
     type NativeShape = S;
 
     fn view(&self) -> View<S, D> {
@@ -2132,19 +2264,21 @@ impl<S: Shape + ShapeEq<S>, D: ?Sized> IntoView<D> for View<'_, S, D> {
     }
 }
 
-impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewWithShape<S, D> for ViewMut<'_, S2, D> {
+impl<S: Shape, S2: Shape + BroadcastInto<S>, D: ?Sized> IntoViewWithShape<S, D>
+    for ViewMut<'_, S2, D>
+{
     fn view_with_shape(&self, shape: S) -> View<S, D> {
-        self.shape.shape_mismatch_fail(&shape);
+        self.shape.broadcast_into_fail(shape);
         View {
             shape,
             offset: self.offset,
-            strides: self.strides.into(),
+            strides: S2::into_index(self.strides),
             data: self.data,
         }
     }
 }
 
-impl<S: Shape + ShapeEq<S>, D: ?Sized> IntoView<D> for ViewMut<'_, S, D> {
+impl<S: Shape + BroadcastInto<S>, D: ?Sized> IntoView<D> for ViewMut<'_, S, D> {
     type NativeShape = S;
 
     fn view(&self) -> View<S, D> {
@@ -2205,24 +2339,27 @@ pub trait IntoViewMut<D: ?Sized>: IntoView<D> + IntoViewMutWithShape<Self::Nativ
 
 impl<
         S: Shape,
-        S2: Shape + ShapeEq<S>,
+        S2: Shape + BroadcastIntoNoAlias<S>,
         D: ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > IntoViewMutWithShape<S, D> for Array<S2, D2>
 {
     fn view_mut_with_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
-        self.shape.shape_mismatch_fail(&shape);
+        self.shape.can_broadcast_into(shape);
         ViewMut {
             shape,
             offset: self.offset,
-            strides: self.strides.into(), // Shouldn't fail if shapes match
+            strides: S2::into_index(self.strides),
             data: &mut self.data,
         }
     }
 }
 
-impl<S: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>>
-    IntoViewMut<D> for Array<S, D2>
+impl<
+        S: Shape + BroadcastIntoNoAlias<S>,
+        D: ?Sized,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > IntoViewMut<D> for Array<S, D2>
 {
     fn view_mut(&mut self) -> ViewMut<'_, S, D> {
         ViewMut {
@@ -2234,21 +2371,21 @@ impl<S: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMu
     }
 }
 
-impl<S: Shape, S2: Shape + ShapeEq<S>, D: ?Sized> IntoViewMutWithShape<S, D>
+impl<S: Shape, S2: Shape + BroadcastIntoNoAlias<S>, D: ?Sized> IntoViewMutWithShape<S, D>
     for ViewMut<'_, S2, D>
 {
     fn view_mut_with_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
-        self.shape.shape_mismatch_fail(&shape);
+        self.shape.can_broadcast_into(shape);
         ViewMut {
             shape,
             offset: self.offset,
-            strides: self.strides.into(), // Shouldn't fail if shapes match
+            strides: S2::into_index(self.strides),
             data: self.data,
         }
     }
 }
 
-impl<S: Shape + ShapeEq<S>, D: ?Sized> IntoViewMut<D> for ViewMut<'_, S, D> {
+impl<S: Shape + BroadcastIntoNoAlias<S>, D: ?Sized> IntoViewMut<D> for ViewMut<'_, S, D> {
     fn view_mut(&mut self) -> ViewMut<'_, S, D> {
         ViewMut {
             shape: self.shape.clone(),
@@ -2560,8 +2697,8 @@ pub trait OutTarget {
 
 impl<
         'a,
-        S: Shape + ShapeEq<S>,
-        S2: Shape + ShapeEq<S>,
+        S: Shape + BroadcastIntoNoAlias<S>,
+        S2: Shape + BroadcastIntoNoAlias<S>,
         D: 'a + ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > IntoTargetWithShape<S, D> for &'a mut Array<S2, D2>
@@ -2575,7 +2712,7 @@ impl<
 
 impl<
         'a,
-        S: Shape + ShapeEq<S>,
+        S: Shape + BroadcastIntoNoAlias<S>,
         D: 'a + ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > IntoTarget<D> for &'a mut Array<S, D2>
@@ -2587,8 +2724,8 @@ impl<
     }
 }
 
-impl<'a, S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized> IntoTargetWithShape<S, D>
-    for &'a mut ViewMut<'a, S2, D>
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, S2: Shape + BroadcastIntoNoAlias<S>, D: ?Sized>
+    IntoTargetWithShape<S, D> for &'a mut ViewMut<'a, S2, D>
 {
     type Target = ViewMut<'a, S, D>;
 
@@ -2597,7 +2734,9 @@ impl<'a, S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized> IntoTargetWit
     }
 }
 
-impl<'a, S: Shape + ShapeEq<S>, D: ?Sized> IntoTarget<D> for &'a mut ViewMut<'a, S, D> {
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: ?Sized> IntoTarget<D>
+    for &'a mut ViewMut<'a, S, D>
+{
     type NativeShape = S;
 
     fn build(self) -> Self::Target {
@@ -2631,32 +2770,36 @@ pub fn alloc_shape<S: Shape, E>(shape: S) -> AllocShape<S, E> {
 ///
 /// This should never need to be constructed directly
 /// (see [IntoTarget])
-pub struct ArrayTarget<S: Shape, S2: Shape + ShapeEq<S>, D> {
+pub struct ArrayTarget<S: Shape, S2: Shape + BroadcastInto<S>, D> {
     array: Array<S2, D>,
     shape: S,
 }
 
 impl<
         S: Shape,
-        S2: Shape + ShapeEq<S>,
-        S3: Shape + ShapeEq<S2>,
+        S2: Shape + BroadcastInto<S>,
+        S3: Shape + BroadcastInto<S2>,
         D: ?Sized,
         D2: ops::Deref<Target = D>,
     > IntoViewWithShape<S, D> for ArrayTarget<S2, S3, D2>
 {
     fn view_with_shape(&self, shape: S) -> View<S, D> {
-        self.shape.shape_mismatch_fail(&shape);
+        self.shape.broadcast_into_fail(shape);
         View {
             shape,
             offset: self.array.offset,
-            strides: self.array.strides.into().into(),
+            strides: S2::into_index(S3::into_index(self.array.strides)),
             data: &self.array.data,
         }
     }
 }
 
-impl<S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Target = D>>
-    IntoView<D> for ArrayTarget<S, S2, D2>
+impl<
+        S: Shape + BroadcastInto<S>,
+        S2: Shape + BroadcastInto<S>,
+        D: ?Sized,
+        D2: ops::Deref<Target = D>,
+    > IntoView<D> for ArrayTarget<S, S2, D2>
 {
     type NativeShape = S;
 
@@ -2664,7 +2807,7 @@ impl<S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Ta
         View {
             shape: self.shape.clone(),
             offset: self.array.offset,
-            strides: self.array.strides.into(),
+            strides: S2::into_index(self.array.strides),
             data: &self.array.data,
         }
     }
@@ -2672,26 +2815,26 @@ impl<S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, D: ?Sized, D2: ops::Deref<Ta
 
 impl<
         S: Shape,
-        S2: Shape + ShapeEq<S>,
-        S3: Shape + ShapeEq<S2>,
+        S2: Shape + BroadcastIntoNoAlias<S>,
+        S3: Shape + BroadcastIntoNoAlias<S2>,
         D: ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > IntoViewMutWithShape<S, D> for ArrayTarget<S2, S3, D2>
 {
     fn view_mut_with_shape(&mut self, shape: S) -> ViewMut<'_, S, D> {
-        self.shape.shape_mismatch_fail(&shape);
+        self.shape.broadcast_into_fail(shape);
         ViewMut {
             shape,
             offset: self.array.offset,
-            strides: self.array.strides.into().into(),
+            strides: S2::into_index(S3::into_index(self.array.strides)),
             data: &mut self.array.data,
         }
     }
 }
 
 impl<
-        S: Shape + ShapeEq<S>,
-        S2: Shape + ShapeEq<S>,
+        S: Shape + BroadcastIntoNoAlias<S>,
+        S2: Shape + BroadcastIntoNoAlias<S>,
         D: ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > IntoViewMut<D> for ArrayTarget<S, S2, D2>
@@ -2700,13 +2843,13 @@ impl<
         ViewMut {
             shape: self.shape.clone(),
             offset: self.array.offset,
-            strides: self.array.strides.into(),
+            strides: S2::into_index(self.array.strides),
             data: &mut self.array.data,
         }
     }
 }
 
-impl<'a, S: Shape, S2: Shape + ShapeEq<S>, D> OutTarget for ArrayTarget<S, S2, D> {
+impl<'a, S: Shape, S2: Shape + BroadcastIntoNoAlias<S>, D> OutTarget for ArrayTarget<S, S2, D> {
     type Output = Array<S2, D>;
 
     fn output(self) -> Self::Output {
@@ -2714,8 +2857,12 @@ impl<'a, S: Shape, S2: Shape + ShapeEq<S>, D> OutTarget for ArrayTarget<S, S2, D
     }
 }
 
-impl<'a, S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, E: Default + Clone>
-    IntoTargetWithShape<S, [E]> for AllocShape<S2, E>
+impl<
+        'a,
+        S: Shape + BroadcastIntoNoAlias<S>,
+        S2: Shape + BroadcastIntoNoAlias<S>,
+        E: Default + Clone,
+    > IntoTargetWithShape<S, [E]> for AllocShape<S2, E>
 {
     type Target = ArrayTarget<S, S2, Vec<E>>;
 
@@ -2723,7 +2870,7 @@ impl<'a, S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, E: Default + Clone>
         let AllocShape {
             shape: self_shape, ..
         } = self;
-        self_shape.shape_mismatch_fail(&shape);
+        self_shape.broadcast_into_fail(shape);
         ArrayTarget {
             shape,
             array: Array {
@@ -2736,7 +2883,9 @@ impl<'a, S: Shape + ShapeEq<S>, S2: Shape + ShapeEq<S>, E: Default + Clone>
     }
 }
 
-impl<'a, S: Shape + ShapeEq<S>, E: Default + Clone> IntoTarget<[E]> for AllocShape<S, E> {
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> IntoTarget<[E]>
+    for AllocShape<S, E>
+{
     type NativeShape = S;
 
     fn build(self) -> Self::Target {
@@ -2763,8 +2912,8 @@ pub fn alloc<E>() -> Alloc<E> {
     }
 }
 
-impl<'a, S: Shape + ShapeEq<S>, E: Default + Clone, D: ?Sized> IntoTargetWithShape<S, D>
-    for Alloc<E>
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone, D: ?Sized>
+    IntoTargetWithShape<S, D> for Alloc<E>
 where
     Vec<E>: ops::DerefMut<Target = D> + ops::Deref<Target = D>,
 {
@@ -2811,8 +2960,8 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc, alloc_shape, Array, AsIndex, Const, DefiniteRange, IntoTarget, IntoTargetWithShape,
-        IntoView, IntoViewMut, OutTarget, Shape, ShapeEq,
+        alloc, alloc_shape, Array, AsIndex, BroadcastTogether, Const, DefiniteRange, IntoTarget,
+        IntoTargetWithShape, IntoView, IntoViewMut, NewAxis, OutTarget, Shape, ShapeEq,
     };
 
     #[test]
@@ -2964,5 +3113,41 @@ mod test {
 
         ones(&mut a);
         ones(alloc_shape((((), 4), 4)));
+    }
+
+    #[test]
+    fn test_broadcast() {
+        let s = (((), Const::<3>), Const::<4>);
+        assert_eq!(
+            s.broadcast_together((((), Const::<3>), Const::<4>))
+                .unwrap()
+                .as_index(),
+            [3, 4]
+        );
+        assert_eq!(
+            s.broadcast_together((((), Const::<3>), 4))
+                .unwrap()
+                .as_index(),
+            [3, 4]
+        );
+        assert_eq!(
+            s.broadcast_together((((), 3), 4)).unwrap().as_index(),
+            [3, 4]
+        );
+        assert!(s.broadcast_together((((), Const::<3>), 5)).is_none());
+        assert!(s.broadcast_together((((), 3), 5)).is_none());
+
+        assert_eq!(s.broadcast_together(()).unwrap().as_index(), [3, 4]);
+        assert_eq!(s.broadcast_together(((), 4)).unwrap().as_index(), [3, 4]);
+        assert_eq!(
+            s.broadcast_together((((), 3), NewAxis)).unwrap().as_index(),
+            [3, 4]
+        );
+        assert_eq!(
+            s.broadcast_together(((((), 10), 3), NewAxis))
+                .unwrap()
+                .as_index(),
+            [10, 3, 4]
+        );
     }
 }
