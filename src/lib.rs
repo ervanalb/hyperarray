@@ -1,5 +1,3 @@
-mod shape_impls;
-
 use std::fmt;
 use std::marker;
 use std::ops;
@@ -357,10 +355,323 @@ impl<const N: usize> Index for [usize; N] {
     }
 }
 
-/*
+/////////////////////////////////////////////
+// Private helper trait for fixed-length array building
+
+pub trait FLA {
+    type OneBigger: Split<OneSmaller = Self>;
+
+    fn append(self, a: usize) -> Self::OneBigger;
+}
+
+pub trait Split {
+    type OneSmaller: FLA<OneBigger = Self>;
+
+    fn split(self) -> (Self::OneSmaller, usize);
+}
+
+impl FLA for [usize; 0] {
+    type OneBigger = [usize; 1];
+
+    fn append(self, a: usize) -> Self::OneBigger {
+        [a]
+    }
+}
+
+impl Split for [usize; 1] {
+    type OneSmaller = [usize; 0];
+
+    fn split(self) -> ([usize; 0], usize) {
+        ([], self[0])
+    }
+}
+
+impl FLA for [usize; 1] {
+    type OneBigger = [usize; 2];
+
+    fn append(self, a: usize) -> Self::OneBigger {
+        [self[0], a]
+    }
+}
+
+impl Split for [usize; 2] {
+    type OneSmaller = [usize; 1];
+
+    fn split(self) -> ([usize; 1], usize) {
+        ([self[0]], self[1])
+    }
+}
+
+impl FLA for [usize; 2] {
+    type OneBigger = [usize; 3];
+
+    fn append(self, a: usize) -> Self::OneBigger {
+        [self[0], self[1], a]
+    }
+}
+
+impl Split for [usize; 3] {
+    type OneSmaller = [usize; 2];
+
+    fn split(self) -> ([usize; 2], usize) {
+        ([self[0], self[1]], self[2])
+    }
+}
 
 /////////////////////////////////////////////
 // Shape Implementations
+
+// Shape
+
+impl Shape for () {}
+
+impl<S: Shape, const N: usize> Shape for (S, Const<N>) where S::Index: FLA<OneBigger: Index> {}
+
+impl<S: Shape> Shape for (S, usize) where S::Index: FLA<OneBigger: Index> {}
+
+impl<S: Shape> Shape for (S, NewAxis) {}
+
+// AsIndex
+
+impl AsIndex for () {
+    type Index = [usize; 0];
+
+    fn as_index(&self) -> Self::Index {
+        []
+    }
+}
+
+impl<S: AsIndex, const N: usize> AsIndex for (S, Const<N>)
+where
+    S::Index: FLA<OneBigger: Index>,
+{
+    type Index = <S::Index as FLA>::OneBigger;
+
+    fn as_index(&self) -> Self::Index {
+        self.0.as_index().append(N)
+    }
+}
+
+impl<S: AsIndex> AsIndex for (S, usize)
+where
+    S::Index: FLA<OneBigger: Index>,
+{
+    type Index = <S::Index as FLA>::OneBigger;
+
+    fn as_index(&self) -> Self::Index {
+        self.0.as_index().append(self.1)
+    }
+}
+
+impl<S: AsIndex> AsIndex for (S, NewAxis) {
+    type Index = S::Index;
+
+    fn as_index(&self) -> Self::Index {
+        self.0.as_index()
+    }
+}
+
+// IntoIndex
+
+impl<S1: IntoIndex<S2>, S2: Shape> IntoIndex<(S2, NewAxis)> for (S1, NewAxis) {
+    fn into_index(index: S1::Index) -> S2::Index {
+        S1::into_index(index)
+    }
+}
+
+impl<S2: Shape> IntoIndex<(S2, NewAxis)> for ()
+where
+    ((), NewAxis): IntoIndex<S2>,
+{
+    fn into_index(index: [usize; 0]) -> S2::Index {
+        <((), NewAxis) as IntoIndex<S2>>::into_index(index)
+    }
+}
+
+impl<S1: Shape<Index = [usize; 0]>> IntoIndex<()> for (S1, NewAxis) {
+    fn into_index(_index: [usize; 0]) -> [usize; 0] {
+        []
+    }
+}
+
+impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for (S1, NewAxis)
+where
+    <S1 as AsIndex>::Index: FLA,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(index: <S1 as AsIndex>::Index) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        S1::into_index(index).append(0)
+    }
+}
+
+impl<S1: IntoIndex<S2>, S2: Shape> IntoIndex<(S2, usize)> for (S1, NewAxis)
+where
+    <S1 as AsIndex>::Index: FLA,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(index: <S1 as AsIndex>::Index) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        S1::into_index(index).append(0)
+    }
+}
+
+impl<S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for ()
+where
+    ((), NewAxis): IntoIndex<S2>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(index: [usize; 0]) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        <((), NewAxis) as IntoIndex<S2>>::into_index(index).append(0)
+    }
+}
+
+impl<S2: Shape> IntoIndex<(S2, usize)> for ()
+where
+    ((), NewAxis): IntoIndex<S2>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(index: [usize; 0]) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        <((), NewAxis) as IntoIndex<S2>>::into_index(index).append(0)
+    }
+}
+
+impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for (S1, Const<N>)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(
+        index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
+    ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        let (index_rest, index_last) = index.split();
+        S1::into_index(index_rest).append(index_last)
+    }
+}
+
+impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, Const<N>)> for (S1, usize)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(
+        index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
+    ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        let (index_rest, index_last) = index.split();
+        S1::into_index(index_rest).append(index_last)
+    }
+}
+
+impl<S1: IntoIndex<S2>, S2: Shape, const N: usize> IntoIndex<(S2, usize)> for (S1, Const<N>)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(
+        index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
+    ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        let (index_rest, index_last) = index.split();
+        S1::into_index(index_rest).append(index_last)
+    }
+}
+
+impl<S1: IntoIndex<S2>, S2: Shape> IntoIndex<(S2, usize)> for (S1, usize)
+where
+    <S1 as AsIndex>::Index: FLA<OneBigger: Index>,
+    <S2 as AsIndex>::Index: FLA<OneBigger: Index>,
+{
+    fn into_index(
+        index: <<S1 as AsIndex>::Index as FLA>::OneBigger,
+    ) -> <<S2 as AsIndex>::Index as FLA>::OneBigger {
+        let (index_rest, index_last) = index.split();
+        S1::into_index(index_rest).append(index_last)
+    }
+}
+
+// ShapeEq
+
+impl ShapeEq<()> for () {
+    fn shape_eq(&self, _other: &()) -> bool {
+        true
+    }
+}
+
+impl<S2: Shape> ShapeEq<(S2, NewAxis)> for ()
+where
+    (): ShapeEq<S2>,
+{
+    fn shape_eq(&self, other: &(S2, NewAxis)) -> bool {
+        ().shape_eq(&other.0)
+    }
+}
+
+//impl<S2: Shape<Index=[usize; 0]>, const N: usize> ShapeEq<(S2, Const<N>)> for () { ! }
+
+//impl<S2: Shape> ShapeEq<(S2, usize)> for () { ! }
+
+impl<S1: ShapeEq<()>> ShapeEq<()> for (S1, NewAxis) {
+    fn shape_eq(&self, _other: &()) -> bool {
+        self.0.shape_eq(&())
+    }
+}
+
+impl<S1: ShapeEq<S2>, S2: Shape> ShapeEq<(S2, NewAxis)> for (S1, NewAxis) {
+    fn shape_eq(&self, other: &(S2, NewAxis)) -> bool {
+        self.0.shape_eq(&other.0)
+    }
+}
+
+//impl<S1: ShapeEq<S2>, S2: Shape, const N: usize> ShapeEq<(S2, Const<N>)> for (S1, NewAxis) { ! }
+
+//impl<S1: ShapeEq<S2>, S2: Shape> ShapeEq<(S2, usize)> for (S1, NewAxis) { ! }
+
+//impl<S1: ShapeEq<()>, const N: usize> ShapeEq<()> for (S1, Const<N>) { ! }
+
+//impl<S1: ShapeEq<S2>, S2: Shape, const N: usize> ShapeEq<(S2, Const<N>)> for (S1, NewAxis) { ! }
+
+impl<S1: ShapeEq<S2>, S2: Shape, const N: usize> ShapeEq<(S2, Const<N>)> for (S1, Const<N>)
+where
+    (S1, Const<N>): Shape<Index = <(S2, Const<N>) as AsIndex>::Index>,
+    (S2, Const<N>): Shape,
+{
+    fn shape_eq(&self, other: &(S2, Const<N>)) -> bool {
+        self.0.shape_eq(&other.0)
+    }
+}
+
+impl<S1: ShapeEq<S2>, S2: Shape, const N: usize> ShapeEq<(S2, Const<N>)> for (S1, usize)
+where
+    (S1, usize): Shape<Index = <(S2, Const<N>) as AsIndex>::Index>,
+    (S2, Const<N>): Shape,
+{
+    fn shape_eq(&self, other: &(S2, Const<N>)) -> bool {
+        self.0.shape_eq(&other.0) && self.1 == N
+    }
+}
+
+//impl<S1: ShapeEq<()>> ShapeEq<()> for (S1, usize) { ! }
+
+// impl<S1: ShapeEq<S2>, S2: Shape, const N: usize> ShapeEq<(S2, usize)> for (S1, NewAxis) { ! }
+
+impl<S1: ShapeEq<S2>, S2: Shape, const N: usize> ShapeEq<(S2, usize)> for (S1, Const<N>)
+where
+    (S1, Const<N>): Shape<Index = <(S2, usize) as AsIndex>::Index>,
+    (S2, usize): Shape,
+{
+    fn shape_eq(&self, other: &(S2, usize)) -> bool {
+        self.0.shape_eq(&other.0) && N == other.1
+    }
+}
+
+impl<S1: ShapeEq<S2>, S2: Shape> ShapeEq<(S2, usize)> for (S1, usize)
+where
+    (S1, usize): Shape<Index = <(S2, usize) as AsIndex>::Index>,
+    (S2, usize): Shape,
+{
+    fn shape_eq(&self, other: &(S2, usize)) -> bool {
+        self.0.shape_eq(&other.0) && self.1 == other.1
+    }
+}
+
+/*
 
 // Base case-- 0D
 
@@ -2278,25 +2589,25 @@ mod test {
 
     #[test]
     fn test_shapes() {
-        let s = (Const::<3>, Const::<4>);
-        assert!(s.shape_eq(&(Const::<3>, Const::<4>)));
-        assert!(s.shape_eq(&(Const::<3>, 4)));
-        assert!(s.shape_eq(&(3, 4)));
-        assert!(!s.shape_eq(&(Const::<3>, 5)));
-        assert!(!s.shape_eq(&(3, 5)));
+        let s = (((), Const::<3>), Const::<4>);
+        assert!(s.shape_eq(&(((), Const::<3>), Const::<4>)));
+        assert!(s.shape_eq(&(((), Const::<3>), 4)));
+        assert!(s.shape_eq(&(((), 3), 4)));
+        assert!(!s.shape_eq(&(((), Const::<3>), 5)));
+        assert!(!s.shape_eq(&(((), 3), 5)));
 
-        assert!((Const::<3>, Const::<4>).shape_eq(&s));
-        assert!((Const::<3>, 4).shape_eq(&s));
-        assert!((3, 4).shape_eq(&s));
-        assert!(!(Const::<3>, 5).shape_eq(&s));
-        assert!(!(3, 5).shape_eq(&s));
+        assert!((((), Const::<3>), Const::<4>).shape_eq(&s));
+        assert!((((), Const::<3>), 4).shape_eq(&s));
+        assert!((((), 3), 4).shape_eq(&s));
+        assert!(!(((), Const::<3>), 5).shape_eq(&s));
+        assert!(!(((), 3), 5).shape_eq(&s));
     }
 
     #[test]
     fn test_iter() {
         let mut t = Array {
-            shape: (Const::<2>, Const::<2>),
-            strides: (Const::<2>, Const::<2>).default_strides(),
+            shape: (((), Const::<2>), Const::<2>),
+            strides: (((), Const::<2>), Const::<2>).default_strides(),
             offset: 0,
             data: vec![1, 2, 3, 4],
         };
@@ -2361,8 +2672,8 @@ mod test {
         // TEST DATA
 
         let a = Array {
-            shape: (Const::<2>, Const::<2>),
-            strides: (Const::<2>, Const::<2>).default_strides(),
+            shape: (((), Const::<2>), Const::<2>),
+            strides: (((), Const::<2>), Const::<2>).default_strides(),
             offset: 0,
             data: vec![1., 2., 3., 4.],
         };
@@ -2379,7 +2690,7 @@ mod test {
         //bernstein_coef(&a.view(), &mut b);
 
         dbg!(bernstein_coef(&a, alloc()));
-        dbg!(bernstein_coef(&a, alloc_shape((2, 2))));
+        dbg!(bernstein_coef(&a, alloc_shape((((), 2), 2))));
         //panic!();
 
         //bernstein_coef(&a, &mut b);
@@ -2394,8 +2705,8 @@ mod test {
         }
 
         let a = Array {
-            shape: (Const::<2>, Const::<2>),
-            strides: (Const::<2>, Const::<2>).default_strides(),
+            shape: (((), Const::<2>), Const::<2>),
+            strides: (((), Const::<2>), Const::<2>).default_strides(),
             offset: 0,
             data: vec![1., 2., 3., 4.],
         };
@@ -2417,13 +2728,13 @@ mod test {
         }
 
         let mut a = Array {
-            shape: (Const::<2>, Const::<2>),
-            strides: (Const::<2>, Const::<2>).default_strides(),
+            shape: (((), Const::<2>), Const::<2>),
+            strides: (((), Const::<2>), Const::<2>).default_strides(),
             offset: 0,
             data: vec![1., 2., 3., 4.],
         };
 
         ones(&mut a);
-        ones(alloc_shape((4, 4)));
+        ones(alloc_shape((((), 4), 4)));
     }
 }

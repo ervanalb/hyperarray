@@ -6,11 +6,14 @@ def all_shapes(max_dim):
             return [""]
 
         all_shapes_prev = all_shapes_inner(max_dim - 1)
-        return [e + sh for e in "CUN" for sh in all_shapes_prev]
+        return [e + sh for e in "NU" for sh in all_shapes_prev]
+
+    #def strip_leading_n(s):
+    #    while s.endswith("N"):
+    #        s = s[:-1]
+    #    return s
 
     def strip_leading_n(s):
-        while s.endswith("N"):
-            s = s[:-1]
         return s
 
     return [strip_leading_n(s) for s in all_shapes_inner(max_dim)]
@@ -21,23 +24,14 @@ def pad(*s):
 
 def type_name(e, i):
     return {
-        "C": f"Const<N{i}>",
         "U": "usize",
         "N": "NewAxis",
     }[e]
 
 def component_value_usize(e, i, l, var="self"):
     return {
-        "C": f"N{i}",
         "U": f"{var}.{l - i - 1}",
     }[e]
-
-def const_generics(*s):
-    s = pad(*s)
-    result = "".join([f"const N{i}: usize, " for (i, es) in enumerate(zip(*s)) if "C" in es])
-    if result:
-        result = "<" + result + ">"
-    return result
 
 def shape_type(s):
     return "(" + "".join([type_name(e, i) + ", " for (i, e) in reversed(list(enumerate(s)))]) + ")"
@@ -49,7 +43,7 @@ def impl_shape(s):
     index_val = "[" + "".join([component_value_usize(e, i, len(s)) + ", " for (i, e) in reversed(list(enumerate(s))) if e != "N"]) + "]"
 
     print(f"""
-impl{const_generics(s)} AsIndex for {shape_type(s)}
+impl AsIndex for {shape_type(s)}
 {{
     type Index = [usize; {index_len(s)}];
 
@@ -57,7 +51,7 @@ impl{const_generics(s)} AsIndex for {shape_type(s)}
         {index_val}
     }}
 }}
-impl{const_generics(s)} Shape for {shape_type(s)} {{}}
+impl Shape for {shape_type(s)} {{}}
     """)
 
 
@@ -68,12 +62,6 @@ def impl_shape_eq(s1, s2):
     def dims_equal(e1, e2, i):
         if e1 == "N" and e2 == "N":
             return True
-        elif e1 == "C" and e2 == "C":
-            return True
-        elif e1 == "C" and e2 == "U":         
-            return f"N{i} == other.{len(s2) - i - 1}"
-        elif e1 == "U" and e2 == "C":
-            return f"self.{len(s1) - i - 1} == N{i}"
         elif e1 == "U" and e2 == "U":
             return f"self.{len(s1) - i - 1} == other.{len(s2) - i - 1}"
         else:
@@ -90,7 +78,7 @@ def impl_shape_eq(s1, s2):
     other = "other" if "other" in shape_eq else "_other"
 
     print(f"""
-impl{const_generics(s1, s2)} ShapeEq<{shape_type(s2)}> for {shape_type(s1)}
+impl ShapeEq<{shape_type(s2)}> for {shape_type(s1)}
 {{
     fn shape_eq(&self, {other}: &{shape_type(s2)}) -> bool {{
         {shape_eq}
@@ -100,8 +88,6 @@ impl{const_generics(s1, s2)} ShapeEq<{shape_type(s2)}> for {shape_type(s1)}
 
 def broadcast(s1, s2):
     def broadcast_dim(e1, e2):
-        if e1 == "C" or e2 == "C":
-            return "C"
         if e1 == "U" or e2 == "U":
             return "U"
         return "N"
@@ -124,7 +110,6 @@ def impl_into_index(s1, s2):
         elif e1 == "N" and e2 != "N":
             index_map.append("0, ")
         else:
-            print("s1", s1, "s2", s2, "i", i, file=sys.stderr)
             assert False, "Bad broadcast?"
 
     index_map_code = "[" + "".join(index_map) + "]"
@@ -132,7 +117,7 @@ def impl_into_index(s1, s2):
     index = "index" if "index" in index_map_code else "_index"
 
     print(f"""
-impl{const_generics(s1, s2)} IntoIndex<{shape_type(s2)}> for {shape_type(s1)}
+impl IntoIndex<{shape_type(s2)}> for {shape_type(s1)}
 {{
     fn into_index({index}: [usize; {index_len(s1)}]) -> [usize; {index_len(s2)}] {{
         {index_map_code}
@@ -149,16 +134,10 @@ def impl_broadcast(s1, s2):
     def dims_broadcast(e1, e2, i):
         if e1 == "N" and e2 == "N":
             return "NewAxis, "
-        elif e1 == "C" and e2 in ("C", "N") or e1 in ("C", "N") and e2 =="C":
-            return f"Const, "
         elif e1 == "U" and e2 == "N":
             return f"self.{len(s1) - i - 1}, "
         elif e1 == "N" and e2 == "U":
             return f"other.{len(s2) - i - 1}, "
-        elif e1 == "C" and e2 == "U":         
-            return f"(N{i} == other.{len(s2) - i - 1}).then_some(Const)?, "
-        elif e1 == "U" and e2 == "C":
-            return f"(self.{len(s1) - i - 1} == N{i}).then_some(Const)?, "
         elif e1 == "U" and e2 == "U":
             return f"(self.{len(s1) - i - 1} == other.{len(s2) - i - 1}).then_some(self.{len(s1) - i - 1})?, "
         else:
@@ -173,7 +152,7 @@ def impl_broadcast(s1, s2):
     other = "other" if "other" in shape_broadcast else "_other"
 
     print(f"""
-impl{const_generics(s1, s2, s3)} BroadcastShape<{shape_type(s2)}> for {shape_type(s1)}
+impl BroadcastShape<{shape_type(s2)}> for {shape_type(s1)}
 {{
     type Output = {shape_type(s3)};
     fn broadcast_shape(self, {other}: {shape_type(s2)}) -> Option<Self::Output> {{
@@ -189,9 +168,6 @@ print("""
 use crate::{AsIndex, Const, NewAxis, Shape, ShapeEq, IntoIndex, BroadcastShape};
 """)
 
-
-#print(const_generics("C", "UC"), file=sys.stderr)
-#sys.exit(1)
 
 print("n=", len(all_s), file=sys.stderr)
 print("n^2=", len(all_s)**2, file=sys.stderr)
