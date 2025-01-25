@@ -907,6 +907,332 @@ impl_broadcast_with_ab!(,b0 B0 b1 B1);
 impl_broadcast_with_ab!(a0 A0,b0 B0 b1 B1);
 impl_broadcast_with_ab!(a0 A0 a1 A1,b0 B0 b1 B1);
 
+// BroadcastTogether
+
+pub trait BroadcastTogether {
+    type Output: Shape;
+
+    fn broadcast_together(self) -> Option<Self::Output>;
+}
+
+impl BroadcastTogether for () {
+    type Output = ();
+
+    fn broadcast_together(self) -> Option<Self::Output> {
+        Some(())
+    }
+}
+
+macro_rules! impl_broadcast_together {
+    ($($a:ident $A:ident)*) => {
+        impl<$($A,)* A, O> BroadcastTogether for ($($A,)* A,)
+        where
+            ($($A,)*): BroadcastTogether<Output=O>,
+            O: BroadcastWith<A>,
+            A: BroadcastInto<<O as BroadcastWith<A>>::Output>,
+        {
+            type Output = <O as BroadcastWith<A>>::Output;
+
+            fn broadcast_together(self) -> Option<Self::Output> {
+                let ($($a,)* a,) = self;
+                Some(($($a,)*).broadcast_together()?.broadcast_with(a)?)
+            }
+        }
+    };
+}
+
+impl_broadcast_together!();
+impl_broadcast_together!(a0 A0);
+impl_broadcast_together!(a0 A0 a1 A1);
+impl_broadcast_together!(a0 A0 a1 A1 a2 A2);
+
+pub trait BroadcastTogetherArrays {
+    type Output;
+
+    fn broadcast_together_arrays(self) -> Option<Self::Output>;
+}
+
+pub trait IntoBroadcast<S: Shape>: Shaped {
+    type Output;
+
+    fn into_broadcast(self, shape: S) -> Option<Self::Output>;
+}
+
+pub trait Shaped {
+    type Shape;
+
+    fn shape(&self) -> Self::Shape;
+}
+
+impl<T: IntoView> Shaped for &T {
+    type Shape = T::Shape;
+
+    fn shape(&self) -> Self::Shape {
+        IntoView::shape(*self)
+    }
+}
+
+impl<'a, T: IntoView, S: Shape> IntoBroadcast<S> for &'a T
+where
+    T::Shape: BroadcastInto<S>,
+{
+    type Output = View<'a, S, T::Data>;
+
+    // TODO remove into_view_with_shape ??
+    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+        let view = self.view();
+        if !view.shape.can_broadcast_into(shape) {
+            return None;
+        }
+        Some(View {
+            shape,
+            offset: view.offset,
+            strides: T::Shape::into_index(view.strides),
+            data: view.data,
+        })
+    }
+}
+
+impl<T: IntoViewMut> Shaped for &mut T {
+    type Shape = T::Shape;
+
+    fn shape(&self) -> Self::Shape {
+        IntoView::shape(*self)
+    }
+}
+
+impl<'a, T: IntoViewMut + IntoView, S: Shape> IntoBroadcast<S> for &'a mut T
+where
+    T::Shape: BroadcastIntoNoAlias<S>,
+{
+    type Output = ViewMut<'a, S, T::Data>;
+
+    // TODO remove into_view_mut_with_shape ??
+    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+        let view = self.view_mut();
+        if !view.shape.can_broadcast_into(shape) {
+            return None;
+        }
+        Some(ViewMut {
+            shape,
+            offset: view.offset,
+            strides: T::Shape::into_index(view.strides),
+            data: view.data,
+        })
+    }
+}
+
+struct OutMarker<T>(T);
+
+/*
+impl<
+        'a,
+        S: Shape + BroadcastIntoNoAlias<S>,
+        D: 'a + ?Sized,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > IntoTarget for &'a mut Array<S, D2>
+{
+    type Shape = S;
+    type Data = D;
+
+    fn shape(&self) -> Self::Shape {
+        self.shape
+    }
+
+    /*
+    fn build(self) -> Self::Target {
+        self.view_mut()
+    }*/
+}
+
+impl<
+        'a,
+        S: Shape,
+        S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
+        D: 'a + ?Sized,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > IntoTargetWithShape<S> for &'a mut Array<S2, D2>
+{
+    type Target = ViewMut<'a, S, D>;
+
+    fn build_shape(self, shape: S) -> Self::Target {
+        self.view_mut_with_shape(shape)
+    }
+}
+*/
+
+impl<
+        'a,
+        S: Shape + BroadcastIntoNoAlias<S>,
+        D: 'a + ?Sized,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > Shaped for OutMarker<&'a mut Array<S, D2>>
+{
+    type Shape = S;
+
+    fn shape(&self) -> Self::Shape {
+        self.0.shape
+    }
+}
+
+impl<
+        'a,
+        S: Shape,
+        S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
+        D: 'a + ?Sized,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > IntoBroadcast<S> for OutMarker<&'a mut Array<S2, D2>>
+{
+    type Output = ViewMut<'a, S, D>;
+
+    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+        self.0.into_broadcast(shape)
+    }
+}
+
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: 'a + ?Sized> Shaped
+    for OutMarker<&'a mut ViewMut<'a, S, D>>
+{
+    type Shape = S;
+
+    fn shape(&self) -> Self::Shape {
+        self.0.shape
+    }
+}
+
+impl<
+        'a,
+        S: Shape,
+        S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
+        D: 'a + ?Sized,
+    > IntoBroadcast<S> for OutMarker<&'a mut ViewMut<'a, S2, D>>
+{
+    type Output = ViewMut<'a, S, D>;
+
+    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+        self.0.into_broadcast(shape)
+    }
+}
+
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Shaped
+    for OutMarker<AllocShape<S, E>>
+{
+    type Shape = S;
+
+    fn shape(&self) -> Self::Shape {
+        self.0.shape
+    }
+}
+
+impl<
+        'a,
+        S: Shape,
+        S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
+        E: Default + Clone,
+    > IntoBroadcast<S> for OutMarker<AllocShape<S2, E>>
+{
+    type Output = ArrayTarget<S, S2, Vec<E>>;
+
+    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+        let OutMarker(AllocShape {
+            shape: self_shape, ..
+        }) = self;
+        if !self_shape.can_broadcast_into(shape) {
+            return None;
+        }
+        Some(ArrayTarget {
+            shape,
+            array: Array {
+                shape: self_shape,
+                strides: self_shape.default_strides(),
+                offset: 0,
+                data: vec![E::default(); self_shape.num_elements()],
+            },
+        })
+    }
+}
+
+/*
+impl<
+        'a,
+        S: Shape,
+        S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
+        E: Default + Clone,
+    > IntoTargetWithShape<S> for AllocShape<S2, E>
+{
+    type Target = ArrayTarget<S, S2, Vec<E>>;
+
+    fn build_shape(self, shape: S) -> Self::Target {
+        let AllocShape {
+            shape: self_shape, ..
+        } = self;
+        self_shape.broadcast_into_fail(shape);
+        ArrayTarget {
+            shape,
+            array: Array {
+                shape: self_shape,
+                strides: self_shape.default_strides(),
+                offset: 0,
+                data: vec![E::default(); self_shape.num_elements()],
+            },
+        }
+    }
+}
+*/
+
+macro_rules! impl_broadcast_together_arrays {
+    () => {
+        impl BroadcastTogetherArrays for ()
+        {
+            type Output = ();
+
+            fn broadcast_together_arrays(self) -> Option<Self::Output> {
+                Some(())
+            }
+        }
+    };
+
+    ($($a:ident $A:ident)*) => {
+        impl<$($A,)* O: Shape> BroadcastTogetherArrays for ($($A,)*)
+        where
+            ($($A::Shape,)*): BroadcastTogether<Output=O>,
+            $($A: IntoBroadcast<O>,)*
+        {
+            type Output = ($(<$A as IntoBroadcast<O>>::Output,)*);
+
+            fn broadcast_together_arrays(self) -> Option<Self::Output> {
+                let ($($a,)*) = self;
+                let shape = ($(
+                    $a.shape(),
+                )*).broadcast_together()?;
+                Some(($(
+                    $a.into_broadcast(shape)?,
+                )*))
+            }
+        }
+    };
+}
+
+impl_broadcast_together_arrays!();
+impl_broadcast_together_arrays!(a0 A0);
+impl_broadcast_together_arrays!(a0 A0 a1 A1);
+impl_broadcast_together_arrays!(a0 A0 a1 A1 a2 A2);
+impl_broadcast_together_arrays!(a0 A0 a1 A1 a2 A2 a3 A3);
+
+/*
+        impl<$($A: Copy,)* const N: usize, > AsIndex for ($($A,)* Const<N>,)
+        where
+            ($($A,)*): AsIndex<Index: Push<OneBigger: Index>>,
+        {
+            type Index = <<($($A,)*) as AsIndex>::Index as Push>::OneBigger;
+
+            fn as_index(&self) -> Self::Index {
+                let &($($a,)* _,) = self;
+                ($($a,)*).as_index().append(N)
+            }
+        }
+*/
+
 /////////////////////////////////////////////
 
 // TODO Get rid of DefiniteRange trait
@@ -1862,9 +2188,9 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc_shape, Array, AsIndex, BroadcastInto, BroadcastIntoNoAlias, BroadcastWith,
-        Const, DefiniteRange, IntoTargetWithShape, IntoView, IntoViewMut, IntoViewWithShape,
-        NewAxis, OutTarget, Shape,
+        alloc_shape, Array, AsIndex, BroadcastInto, BroadcastIntoNoAlias, BroadcastTogether,
+        BroadcastTogetherArrays, BroadcastWith, Const, DefiniteRange, IntoTargetWithShape,
+        IntoView, IntoViewMut, IntoViewWithShape, NewAxis, OutMarker, OutTarget, Shape, View,
     };
 
     #[test]
@@ -1971,22 +2297,17 @@ mod test {
 
     #[test]
     fn test_sum_prod() {
-        fn sum_prod<S1: Shape, S2: Shape, S: Shape>(
-            in1: &impl IntoView<Shape = S1, Data = [f32]>,
-            in2: &impl IntoView<Shape = S2, Data = [f32]>,
+        fn sum_prod<A: IntoView<Data = [f32]>, B: IntoView<Data = [f32]>, S: Shape>(
+            in1: &A,
+            in2: &B,
         ) -> f32
         where
-            S1: BroadcastInto<S>, // TODO can this be gotten rid of?
-            S2: BroadcastInto<S>, // TODO can this be gotten rid of?
-            S1: BroadcastWith<S2, Output = S>,
+            for<'a> (&'a A, &'a B):
+                BroadcastTogetherArrays<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>)>,
         {
-            let in1 = in1.view();
-            let in2 = in2.view();
-
-            // TODO combine these 3 lines with a convenience function
-            let combined_shape = in1.shape.broadcast_together_fail(in2.shape);
-            let in1 = in1.broadcast_into_fail(combined_shape);
-            let in2 = in2.broadcast_into_fail(combined_shape);
+            let (in1, in2) = (in1, in2)
+                .broadcast_together_arrays()
+                .expect("Arrays cannot be broadcast together");
 
             in1.into_iter()
                 .zip(in2.into_iter())
@@ -2006,35 +2327,19 @@ mod test {
 
     #[test]
     fn test_add() {
-        fn add<
-            A: IntoViewWithShape<S2, Data = [f32]>,
-            B: IntoViewWithShape<S2, Data = [f32]>,
-            O: IntoTargetWithShape<S2, Data = [f32]>,
-            S1: Shape,
-            S2: Shape,
-        >(
+        fn add<A, B, C, O: OutTarget + IntoViewMut<Data = [f32]>, S: Shape>(
             a: &A,
             b: &B,
-            out: O,
-        ) -> <O::Target as OutTarget>::Output
+            out: C,
+        ) -> O::Output
         where
-            A::Shape: BroadcastWith<B::Shape, Output = S1>,
-            S1: BroadcastWith<O::Shape, Output = S2>,
-            B::Shape: BroadcastInto<S1>, // TODO avoid stating this bound?
-            O::Shape: BroadcastInto<S2>, // TODO avoid stating this bound?
+            for<'a> (&'a A, &'a B, OutMarker<C>):
+                BroadcastTogetherArrays<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>, O)>,
         {
-            // let combined_shape = (a.shape, b.shape).broadcast_together_fail();
-            let combined_shape = a
-                .shape()
-                .broadcast_together_fail(b.shape())
-                .broadcast_together_fail(out.shape());
-
-            let mut out_target = out.build_shape(combined_shape);
-
-            // TODO: out_target.view_mut_with_shape(combined_shape);
+            let (a, b, mut out_target) = (a, b, OutMarker(out))
+                .broadcast_together_arrays()
+                .expect("Arrays cannot be broadcast together");
             let mut out = out_target.view_mut();
-            let a = a.view_with_shape(combined_shape);
-            let b = b.view_with_shape(combined_shape);
 
             // ZIP could perform the broadcast??
 
@@ -2135,26 +2440,60 @@ mod test {
 
     #[test]
     fn test_broadcast() {
-        let s = (Const::<3>, Const::<4>);
         assert_eq!(
-            s.broadcast_with((Const::<3>, Const::<4>))
+            ((Const::<3>, Const::<4>), (Const::<3>, Const::<4>))
+                .broadcast_together()
                 .unwrap()
                 .as_index(),
             [3, 4]
         );
         assert_eq!(
-            s.broadcast_with((Const::<3>, 4)).unwrap().as_index(),
+            ((Const::<3>, Const::<4>), (Const::<3>, 4))
+                .broadcast_together()
+                .unwrap()
+                .as_index(),
             [3, 4]
         );
-        assert_eq!(s.broadcast_with((3, 4)).unwrap().as_index(), [3, 4]);
-        assert!(s.broadcast_with((Const::<3>, 5)).is_none());
-        assert!(s.broadcast_with((3, 5)).is_none());
-
-        assert_eq!(s.broadcast_with(()).unwrap().as_index(), [3, 4]);
-        assert_eq!(s.broadcast_with((4,)).unwrap().as_index(), [3, 4]);
-        assert_eq!(s.broadcast_with((3, NewAxis)).unwrap().as_index(), [3, 4]);
         assert_eq!(
-            s.broadcast_with((10, 3, NewAxis)).unwrap().as_index(),
+            ((Const::<3>, Const::<4>), (3, 4))
+                .broadcast_together()
+                .unwrap()
+                .as_index(),
+            [3, 4]
+        );
+        assert!(((Const::<3>, Const::<4>), (Const::<3>, 5))
+            .broadcast_together()
+            .is_none());
+        assert!(((Const::<3>, Const::<4>), (3, 5))
+            .broadcast_together()
+            .is_none());
+
+        assert_eq!(
+            ((Const::<3>, Const::<4>), ())
+                .broadcast_together()
+                .unwrap()
+                .as_index(),
+            [3, 4]
+        );
+        assert_eq!(
+            ((Const::<3>, Const::<4>), (4,))
+                .broadcast_together()
+                .unwrap()
+                .as_index(),
+            [3, 4]
+        );
+        assert_eq!(
+            ((Const::<3>, Const::<4>), (3, NewAxis))
+                .broadcast_together()
+                .unwrap()
+                .as_index(),
+            [3, 4]
+        );
+        assert_eq!(
+            ((Const::<3>, Const::<4>), (10, 3, NewAxis))
+                .broadcast_together()
+                .unwrap()
+                .as_index(),
             [10, 3, 4]
         );
     }
