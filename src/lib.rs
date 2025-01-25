@@ -2188,9 +2188,8 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc_shape, Array, AsIndex, BroadcastInto, BroadcastIntoNoAlias, BroadcastTogether,
-        BroadcastTogetherArrays, BroadcastWith, Const, DefiniteRange, IntoTargetWithShape,
-        IntoView, IntoViewMut, IntoViewWithShape, NewAxis, OutMarker, OutTarget, Shape, View,
+        alloc_shape, Array, AsIndex, BroadcastTogether, BroadcastTogetherArrays, Const,
+        DefiniteRange, IntoView, IntoViewMut, NewAxis, OutMarker, OutTarget, Shape, View,
     };
 
     #[test]
@@ -2222,30 +2221,23 @@ mod test {
             numerator / denominator
         }
 
-        fn bernstein_coef<
-            I: IntoViewWithShape<S, Data = [f32]>,
-            O: IntoTargetWithShape<S, Data = [f32]>,
-            S: Shape,
-        >(
-            c_m: &I,
-            out: O,
-        ) -> <O::Target as OutTarget>::Output
+        fn bernstein_coef<A, B, O: OutTarget + IntoViewMut<Shape = S, Data = [f32]>, S: Shape>(
+            c_m: &A,
+            out: B,
+        ) -> O::Output
         where
-            I::Shape: BroadcastWith<O::Shape, Output = S>,
-            I::Shape: BroadcastInto<S>,
-            O::Shape: BroadcastIntoNoAlias<S>,
+            for<'a> (&'a A, OutMarker<B>):
+                BroadcastTogetherArrays<Output = (View<'a, S, [f32]>, O)>,
         {
-            let combined_shape = c_m.shape().broadcast_together_fail(out.shape());
-
-            let c_m = c_m.view_with_shape(combined_shape);
-
-            let mut target = out.build_shape(combined_shape);
-            let mut out_view = target.view_mut();
+            let (c_m, mut out_target) = (c_m, OutMarker(out))
+                .broadcast_together_arrays()
+                .expect("Could not broadcast arrays together");
+            let mut out = out_target.view_mut();
 
             // XXX
             //let val1 = c_m[<<V as IntoView>::Shape as Shape>::Index::zero()];
 
-            for (i, out_entry) in (&mut out_view).into_iter().nd_enumerate() {
+            for (i, out_entry) in (&mut out).into_iter().nd_enumerate() {
                 *out_entry = (..=i)
                     .nd_iter()
                     .map(|j| {
@@ -2267,7 +2259,7 @@ mod test {
                     .sum();
             }
 
-            target.output()
+            out_target.output()
         }
 
         // TEST DATA
@@ -2327,7 +2319,7 @@ mod test {
 
     #[test]
     fn test_add() {
-        fn add<A, B, C, O: OutTarget + IntoViewMut<Data = [f32]>, S: Shape>(
+        fn add<A, B, C, O: OutTarget + IntoViewMut<Shape = S, Data = [f32]>, S: Shape>(
             a: &A,
             b: &B,
             out: C,
@@ -2371,23 +2363,6 @@ mod test {
             data: vec![0.; 8],
         };
 
-        /*
-                fn add<
-                    A: IntoView<Data = [f32]>,
-                    B: IntoView<Data = [f32]>,
-                    O: IntoTarget<Data = [f32]>,
-                >(
-                    a: &A,
-                    b: &B,
-                    out: O,
-                ) -> <O::Target as OutTarget>::Output
-                where
-                    (&A, &B, O): BroadcastTogether,
-                {
-
-                    let (a, b, mut out) = (a, b, out).broadcast_together();
-                }
-        */
         add(&a, &b, &mut c);
 
         assert_eq!(c.data, [11., 12., 21., 22., 11., 12., 21., 22.]);
@@ -2395,10 +2370,13 @@ mod test {
 
     #[test]
     fn test_sum() {
-        fn sum(in1: &impl IntoView<Data = [f32]>) -> f32 {
-            let in1 = in1.view();
+        fn sum<A, S: Shape>(a: &A) -> f32
+        where
+            for<'a> (&'a A,): BroadcastTogetherArrays<Output = (View<'a, S, [f32]>,)>,
+        {
+            let (a,) = (a,).broadcast_together_arrays().unwrap(); // Infalliable?
 
-            in1.into_iter().sum()
+            a.into_iter().sum()
         }
 
         let a = Array {
@@ -2413,11 +2391,11 @@ mod test {
 
     #[test]
     fn test_ones() {
-        fn ones<O: IntoTargetWithShape<S, Shape = S, Data = [f32]>, S: Shape>(
-            out: O,
-        ) -> <O::Target as OutTarget>::Output {
-            let s = out.shape();
-            let mut out_target = out.build_shape(s);
+        fn ones<A, O: OutTarget + IntoViewMut<Data = [f32]>>(out: A) -> O::Output
+        where
+            (OutMarker<A>,): BroadcastTogetherArrays<Output = (O,)>,
+        {
+            let (mut out_target,) = (OutMarker(out),).broadcast_together_arrays().unwrap(); // Infalliable?
             let mut out = out_target.view_mut();
 
             for e in &mut out {
