@@ -946,40 +946,47 @@ impl_broadcast_together!(a0 A0);
 impl_broadcast_together!(a0 A0 a1 A1);
 impl_broadcast_together!(a0 A0 a1 A1 a2 A2);
 
-pub trait BroadcastTogetherArrays {
+pub trait Build {
     type Output;
 
-    fn broadcast_together_arrays(self) -> Option<Self::Output>;
+    fn build(self) -> Option<Self::Output>;
 }
 
-pub trait IntoBroadcast<S: Shape>: Shaped {
+pub trait BuildWithShape<S: Shape> {
     type Output;
 
-    fn into_broadcast(self, shape: S) -> Option<Self::Output>;
+    fn build_with_shape(self, shape: S) -> Option<Self::Output>;
 }
 
 pub trait Shaped {
-    type Shape;
+    type Shape: Shape;
 
-    fn shape(&self) -> Self::Shape;
+    fn shape(&self) -> Option<Self::Shape>;
 }
 
 impl<T: IntoView> Shaped for &T {
     type Shape = T::Shape;
 
-    fn shape(&self) -> Self::Shape {
-        IntoView::shape(*self)
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(IntoView::shape(*self))
     }
 }
 
-impl<'a, T: IntoView, S: Shape> IntoBroadcast<S> for &'a T
+impl<'a, T: IntoView> Build for &'a T {
+    type Output = View<'a, T::Shape, T::Data>;
+
+    fn build(self) -> Option<Self::Output> {
+        Some(self.view())
+    }
+}
+
+impl<'a, T: IntoView, S: Shape> BuildWithShape<S> for &'a T
 where
     T::Shape: BroadcastInto<S>,
 {
     type Output = View<'a, S, T::Data>;
 
-    // TODO remove into_view_with_shape ??
-    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
         let view = self.view();
         if !view.shape.can_broadcast_into(shape) {
             return None;
@@ -996,19 +1003,26 @@ where
 impl<T: IntoViewMut> Shaped for &mut T {
     type Shape = T::Shape;
 
-    fn shape(&self) -> Self::Shape {
-        IntoView::shape(*self)
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(IntoView::shape(*self))
     }
 }
 
-impl<'a, T: IntoViewMut + IntoView, S: Shape> IntoBroadcast<S> for &'a mut T
+impl<'a, T: IntoViewMut> Build for &'a mut T {
+    type Output = ViewMut<'a, T::Shape, T::Data>;
+
+    fn build(self) -> Option<Self::Output> {
+        Some(self.view_mut())
+    }
+}
+
+impl<'a, T: IntoViewMut, S: Shape> BuildWithShape<S> for &'a mut T
 where
     T::Shape: BroadcastIntoNoAlias<S>,
 {
     type Output = ViewMut<'a, S, T::Data>;
 
-    // TODO remove into_view_mut_with_shape ??
-    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
         let view = self.view_mut();
         if !view.shape.can_broadcast_into(shape) {
             return None;
@@ -1033,8 +1047,22 @@ impl<
 {
     type Shape = S;
 
-    fn shape(&self) -> Self::Shape {
-        self.0.shape
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(self.0.shape)
+    }
+}
+
+impl<
+        'a,
+        S: Shape + BroadcastIntoNoAlias<S>,
+        D: 'a + ?Sized,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > Build for OutMarker<&'a mut Array<S, D2>>
+{
+    type Output = ViewMut<'a, S, D>;
+
+    fn build(self) -> Option<Self::Output> {
+        self.0.build()
     }
 }
 
@@ -1044,12 +1072,12 @@ impl<
         S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
         D: 'a + ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
-    > IntoBroadcast<S> for OutMarker<&'a mut Array<S2, D2>>
+    > BuildWithShape<S> for OutMarker<&'a mut Array<S2, D2>>
 {
     type Output = ViewMut<'a, S, D>;
 
-    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
-        self.0.into_broadcast(shape)
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+        self.0.build_with_shape(shape)
     }
 }
 
@@ -1058,8 +1086,18 @@ impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: 'a + ?Sized> Shaped
 {
     type Shape = S;
 
-    fn shape(&self) -> Self::Shape {
-        self.0.shape
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(self.0.shape)
+    }
+}
+
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: 'a + ?Sized> Build
+    for OutMarker<&'a mut ViewMut<'a, S, D>>
+{
+    type Output = ViewMut<'a, S, D>;
+
+    fn build(self) -> Option<Self::Output> {
+        self.0.build()
     }
 }
 
@@ -1068,12 +1106,12 @@ impl<
         S: Shape,
         S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
         D: 'a + ?Sized,
-    > IntoBroadcast<S> for OutMarker<&'a mut ViewMut<'a, S2, D>>
+    > BuildWithShape<S> for OutMarker<&'a mut ViewMut<'a, S2, D>>
 {
     type Output = ViewMut<'a, S, D>;
 
-    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
-        self.0.into_broadcast(shape)
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+        self.0.build_with_shape(shape)
     }
 }
 
@@ -1082,8 +1120,24 @@ impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Shaped
 {
     type Shape = S;
 
-    fn shape(&self) -> Self::Shape {
-        self.0.shape
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(self.0.shape)
+    }
+}
+
+impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Build
+    for OutMarker<AllocShape<S, E>>
+{
+    type Output = Array<S, Vec<E>>;
+
+    fn build(self) -> Option<Self::Output> {
+        let OutMarker(AllocShape { shape, .. }) = self;
+        Some(Array {
+            shape,
+            strides: shape.default_strides(),
+            offset: 0,
+            data: vec![E::default(); shape.num_elements()],
+        })
     }
 }
 
@@ -1092,11 +1146,11 @@ impl<
         S: Shape,
         S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
         E: Default + Clone,
-    > IntoBroadcast<S> for OutMarker<AllocShape<S2, E>>
+    > BuildWithShape<S> for OutMarker<AllocShape<S2, E>>
 {
     type Output = ArrayTarget<S, S2, Vec<E>>;
 
-    fn into_broadcast(self, shape: S) -> Option<Self::Output> {
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
         let OutMarker(AllocShape {
             shape: self_shape, ..
         }) = self;
@@ -1115,33 +1169,84 @@ impl<
     }
 }
 
+pub struct Broadcast<T>(T);
+
+/*
+pub trait BroadcastTogetherArrays {
+    type Output;
+
+    fn broadcast_together_arrays(self) -> Option<Self::Output>;
+}
+*/
+
 macro_rules! impl_broadcast_together_arrays {
     () => {
-        impl BroadcastTogetherArrays for ()
+        impl Build for Broadcast<()>
         {
             type Output = ();
 
-            fn broadcast_together_arrays(self) -> Option<Self::Output> {
+            fn build(self) -> Option<Self::Output> {
+                Some(())
+            }
+        }
+
+        impl<S: Shape> BuildWithShape<S> for Broadcast<()>
+            where (): BroadcastInto<S>
+        {
+            type Output = ();
+
+            fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+                if !().can_broadcast_into(shape) {
+                    return None;
+                }
                 Some(())
             }
         }
     };
 
     ($($a:ident $A:ident)*) => {
-        impl<$($A,)* O: Shape> BroadcastTogetherArrays for ($($A,)*)
+        impl<$($A,)* O: Shape> Shaped for Broadcast<($($A,)*)>
         where
+            $($A: Shaped,)*
             ($($A::Shape,)*): BroadcastTogether<Output=O>,
-            $($A: IntoBroadcast<O>,)*
         {
-            type Output = ($(<$A as IntoBroadcast<O>>::Output,)*);
+            type Shape = O;
 
-            fn broadcast_together_arrays(self) -> Option<Self::Output> {
-                let ($($a,)*) = self;
-                let shape = ($(
-                    $a.shape(),
-                )*).broadcast_together()?;
+            fn shape(&self) -> Option<Self::Shape> {
+                let ($($a,)*) = &self.0;
+                ($(
+                    $a.shape()?,
+                )*).broadcast_together()
+            }
+        }
+
+        impl<$($A,)*> Build for Broadcast<($($A,)*)>
+        where
+            Self: Shaped,
+            $($A: BuildWithShape<<Self as Shaped>::Shape>,)*
+        {
+            type Output = ($(<$A as BuildWithShape<<Self as Shaped>::Shape>>::Output,)*);
+
+            fn build(self) -> Option<Self::Output> {
+                let shape = self.shape()?;
+                let ($($a,)*) = self.0;
                 Some(($(
-                    $a.into_broadcast(shape)?,
+                    $a.build_with_shape(shape)?,
+                )*))
+            }
+        }
+
+        impl<$($A,)* S: Shape> BuildWithShape<S> for Broadcast<($($A,)*)>
+        where
+            Self: Shaped,
+            $($A: BuildWithShape<S>,)*
+        {
+            type Output = ($(<$A as BuildWithShape<S>>::Output,)*);
+
+            fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+                let ($($a,)*) = self.0;
+                Some(($(
+                    $a.build_with_shape(shape)?,
                 )*))
             }
         }
@@ -1907,8 +2012,8 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc_shape, Array, AsIndex, BroadcastTogether, BroadcastTogetherArrays, Const,
-        DefiniteRange, IntoView, IntoViewMut, NewAxis, OutMarker, OutTarget, Shape, View,
+        alloc_shape, Array, AsIndex, Broadcast, BroadcastTogether, Build, Const, DefiniteRange,
+        IntoView, IntoViewMut, NewAxis, OutMarker, OutTarget, Shape, View,
     };
 
     #[test]
@@ -1945,11 +2050,10 @@ mod test {
             out: B,
         ) -> O::Output
         where
-            for<'a> (&'a A, OutMarker<B>):
-                BroadcastTogetherArrays<Output = (View<'a, S, [f32]>, O)>,
+            for<'a> Broadcast<(&'a A, OutMarker<B>)>: Build<Output = (View<'a, S, [f32]>, O)>,
         {
-            let (c_m, mut out_target) = (c_m, OutMarker(out))
-                .broadcast_together_arrays()
+            let (c_m, mut out_target) = Broadcast((c_m, OutMarker(out)))
+                .build()
                 .expect("Could not broadcast arrays together");
             let mut out = out_target.view_mut();
 
@@ -2008,16 +2112,13 @@ mod test {
 
     #[test]
     fn test_sum_prod() {
-        fn sum_prod<A: IntoView<Data = [f32]>, B: IntoView<Data = [f32]>, S: Shape>(
-            in1: &A,
-            in2: &B,
-        ) -> f32
+        fn sum_prod<A, B, S: Shape>(in1: &A, in2: &B) -> f32
         where
-            for<'a> (&'a A, &'a B):
-                BroadcastTogetherArrays<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>)>,
+            for<'a> Broadcast<(&'a A, &'a B)>:
+                Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>)>,
         {
-            let (in1, in2) = (in1, in2)
-                .broadcast_together_arrays()
+            let (in1, in2) = Broadcast((in1, in2))
+                .build()
                 .expect("Arrays cannot be broadcast together");
 
             in1.into_iter()
@@ -2044,15 +2145,13 @@ mod test {
             out: C,
         ) -> O::Output
         where
-            for<'a> (&'a A, &'a B, OutMarker<C>):
-                BroadcastTogetherArrays<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>, O)>,
+            for<'a> Broadcast<(&'a A, &'a B, OutMarker<C>)>:
+                Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>, O)>,
         {
-            let (a, b, mut out_target) = (a, b, OutMarker(out))
-                .broadcast_together_arrays()
+            let (a, b, mut out_target) = Broadcast((a, b, OutMarker(out)))
+                .build()
                 .expect("Arrays cannot be broadcast together");
             let mut out = out_target.view_mut();
-
-            // ZIP could perform the broadcast??
 
             for (out, (a, b)) in (&mut out).into_iter().zip(a.into_iter().zip(b.into_iter())) {
                 *out = a + b;
@@ -2091,9 +2190,9 @@ mod test {
     fn test_sum() {
         fn sum<A, S: Shape>(a: &A) -> f32
         where
-            for<'a> (&'a A,): BroadcastTogetherArrays<Output = (View<'a, S, [f32]>,)>,
+            for<'a> &'a A: Build<Output = View<'a, S, [f32]>>,
         {
-            let (a,) = (a,).broadcast_together_arrays().unwrap(); // Infalliable?
+            let a = a.build().unwrap(); // Infalliable?
 
             a.into_iter().sum()
         }
@@ -2112,9 +2211,9 @@ mod test {
     fn test_ones() {
         fn ones<A, O: OutTarget + IntoViewMut<Data = [f32]>>(out: A) -> O::Output
         where
-            (OutMarker<A>,): BroadcastTogetherArrays<Output = (O,)>,
+            OutMarker<A>: Build<Output = O>,
         {
-            let (mut out_target,) = (OutMarker(out),).broadcast_together_arrays().unwrap(); // Infalliable?
+            let mut out_target = OutMarker(out).build().unwrap(); // Infalliable?
             let mut out = out_target.view_mut();
 
             for e in &mut out {
