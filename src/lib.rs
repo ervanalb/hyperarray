@@ -25,18 +25,18 @@ impl<const N: usize> fmt::Debug for Const<N> {
     }
 }
 
-pub trait BroadcastInto<T>: Shape {
+pub trait BroadcastInto<T> {
     fn can_broadcast_into(self, other: T) -> bool;
 }
 
-pub trait IntoIndex<T: Shape>: BroadcastInto<T> {
+pub trait IntoIndex<T: Shape>: Shape + BroadcastInto<T> {
     fn into_index(index: Self::Index) -> T::Index;
 }
 
 pub trait BroadcastIntoNoAlias<T>: BroadcastInto<T> {}
 
 pub trait BroadcastWith<T: BroadcastInto<Self::Output>>: BroadcastInto<Self::Output> {
-    type Output: Shape;
+    type Output;
 
     fn broadcast_with(self, other: T) -> Option<Self::Output>;
 }
@@ -460,7 +460,7 @@ macro_rules! impl_broadcast_into_a {
         }
 
         impl<$($A: Copy + fmt::Debug,)*> BroadcastIntoNoAlias<()> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastInto<()>,
+            where ($($A,)*): IntoIndex<()>,
             ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
         {}
 
@@ -560,7 +560,7 @@ impl_broadcast_into_b!(b0 B0 b1 B1);
 macro_rules! impl_broadcast_into_ab {
     ($($a:ident $A:ident)*, $($b:ident $B:ident)*) => {
         impl<$($A,)* $($B,)*> BroadcastInto<($($B,)* NewAxis,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastInto<($($B,)*)>,
+            where ($($A,)*): IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
@@ -573,7 +573,7 @@ macro_rules! impl_broadcast_into_ab {
 
         }
         impl<$($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* NewAxis,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastInto<($($B,)*)>,
+            where ($($A,)*): IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
@@ -590,7 +590,7 @@ macro_rules! impl_broadcast_into_ab {
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastInto<($($B,)*)>,
+            where ($($A,)*): IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -614,7 +614,7 @@ macro_rules! impl_broadcast_into_ab {
         }
 
         impl<$($A,)* $($B,)*> BroadcastInto<($($B,)* usize,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastInto<($($B,)*)>,
+            where ($($A,)*): IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -638,7 +638,7 @@ macro_rules! impl_broadcast_into_ab {
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastInto<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -650,7 +650,7 @@ macro_rules! impl_broadcast_into_ab {
             }
         }
         impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* Const<N>,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -668,7 +668,7 @@ macro_rules! impl_broadcast_into_ab {
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* usize,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastInto<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -680,7 +680,7 @@ macro_rules! impl_broadcast_into_ab {
             }
         }
         impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* usize,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -698,7 +698,7 @@ macro_rules! impl_broadcast_into_ab {
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastInto<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -710,7 +710,7 @@ macro_rules! impl_broadcast_into_ab {
             }
         }
         impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* Const<N>,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -728,7 +728,7 @@ macro_rules! impl_broadcast_into_ab {
         }
 
         impl<$($A,)* $($B,)*> BroadcastInto<($($B,)* usize,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastInto<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -740,7 +740,7 @@ macro_rules! impl_broadcast_into_ab {
             }
         }
         impl<$($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* usize,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + IntoIndex<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
@@ -769,6 +769,21 @@ impl_broadcast_into_ab!(,b0 B0 b1 B1);
 impl_broadcast_into_ab!(a0 A0,b0 B0 b1 B1);
 impl_broadcast_into_ab!(a0 A0 a1 A1,b0 B0 b1 B1);
 
+#[derive(Clone, Copy, Debug)]
+pub struct AnyShape;
+
+impl BroadcastInto<AnyShape> for AnyShape {
+    fn can_broadcast_into(self, _other: AnyShape) -> bool {
+        true
+    }
+}
+
+impl<S: Shape> BroadcastInto<S> for AnyShape {
+    fn can_broadcast_into(self, _other: S) -> bool {
+        true
+    }
+}
+
 // BroadcastWith
 
 macro_rules! impl_broadcast_with_a {
@@ -777,6 +792,27 @@ macro_rules! impl_broadcast_with_a {
             type Output = ();
 
             fn broadcast_with(self, _other: ()) -> Option<Self::Output> {
+                Some(())
+            }
+        }
+        impl BroadcastWith<AnyShape> for AnyShape {
+            type Output = AnyShape;
+
+            fn broadcast_with(self, _other: AnyShape) -> Option<Self::Output> {
+                Some(AnyShape)
+            }
+        }
+        impl BroadcastWith<()> for AnyShape {
+            type Output = ();
+
+            fn broadcast_with(self, _other: ()) -> Option<Self::Output> {
+                Some(())
+            }
+        }
+        impl BroadcastWith<AnyShape> for () {
+            type Output = ();
+
+            fn broadcast_with(self, _other: AnyShape) -> Option<Self::Output> {
                 Some(())
             }
         }
@@ -793,9 +829,30 @@ macro_rules! impl_broadcast_with_a {
                 Some(self)
             }
         }
+        impl<$($A,)*> BroadcastWith<AnyShape> for ($($A,)*)
+            where AnyShape: BroadcastInto<($($A,)*)>,
+                  ($($A,)*): BroadcastInto<($($A,)*)>,
+        {
+            type Output = ($($A,)*);
+
+            fn broadcast_with(self, _other: AnyShape) -> Option<Self::Output> {
+                Some(self)
+            }
+        }
+
 
         impl<$($A,)*> BroadcastWith<($($A,)*)> for ()
             where (): BroadcastInto<($($A,)*)>,
+                  ($($A,)*): BroadcastInto<($($A,)*)>,
+        {
+            type Output = ($($A,)*);
+
+            fn broadcast_with(self, other: ($($A,)*)) -> Option<Self::Output> {
+                Some(other)
+            }
+        }
+        impl<$($A,)*> BroadcastWith<($($A,)*)> for AnyShape
+            where AnyShape: BroadcastInto<($($A,)*)>,
                   ($($A,)*): BroadcastInto<($($A,)*)>,
         {
             type Output = ($($A,)*);
@@ -983,7 +1040,7 @@ impl_broadcast_with_ab!(a0 A0 a1 A1,b0 B0 b1 B1);
 // BroadcastTogether
 
 pub trait BroadcastTogether {
-    type Output: Shape;
+    type Output;
 
     fn broadcast_together(self) -> Option<Self::Output>;
 }
@@ -1032,7 +1089,7 @@ pub trait BuildWithShape<S: Shape> {
 }
 
 pub trait Shaped {
-    type Shape: Shape;
+    type Shape;
 
     fn shape(&self) -> Option<Self::Shape>;
 }
@@ -1221,12 +1278,8 @@ impl<'a, S: Shape, S2: IntoIndex<S> + BroadcastIntoNoAlias<S>, D: ?Sized> BuildW
 
 struct OutMarker<T>(T);
 
-impl<
-        'a,
-        S: Shape + BroadcastIntoNoAlias<S>,
-        D: 'a + ?Sized,
-        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
-    > Shaped for OutMarker<&'a mut Array<S, D2>>
+impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> Shaped
+    for OutMarker<&'a mut Array<S, D2>>
 {
     type Shape = S;
 
@@ -1235,12 +1288,8 @@ impl<
     }
 }
 
-impl<
-        'a,
-        S: Shape + BroadcastIntoNoAlias<S>,
-        D: 'a + ?Sized,
-        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
-    > Build for OutMarker<&'a mut Array<S, D2>>
+impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> Build
+    for OutMarker<&'a mut Array<S, D2>>
 {
     type Output = ViewMut<'a, S, D>;
 
@@ -1264,9 +1313,7 @@ impl<
     }
 }
 
-impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: 'a + ?Sized> Shaped
-    for OutMarker<&'a mut ViewMut<'a, S, D>>
-{
+impl<'a, S: Shape, D: 'a + ?Sized> Shaped for OutMarker<&'a mut ViewMut<'a, S, D>> {
     type Shape = S;
 
     fn shape(&self) -> Option<Self::Shape> {
@@ -1274,9 +1321,7 @@ impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: 'a + ?Sized> Shaped
     }
 }
 
-impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: 'a + ?Sized> Build
-    for OutMarker<&'a mut ViewMut<'a, S, D>>
-{
+impl<'a, S: Shape, D: 'a + ?Sized> Build for OutMarker<&'a mut ViewMut<'a, S, D>> {
     type Output = ViewMut<'a, S, D>;
 
     fn build(self) -> Option<Self::Output> {
@@ -1294,9 +1339,7 @@ impl<'a, S: Shape, S2: IntoIndex<S> + BroadcastIntoNoAlias<S>, D: 'a + ?Sized> B
     }
 }
 
-impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Shaped
-    for OutMarker<AllocShape<S, E>>
-{
+impl<'a, S: Shape, E: Default + Clone> Shaped for OutMarker<AllocShape<S, E>> {
     type Shape = S;
 
     fn shape(&self) -> Option<Self::Shape> {
@@ -1304,9 +1347,15 @@ impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Shaped
     }
 }
 
-impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Build
-    for OutMarker<AllocShape<S, E>>
-{
+impl<'a, E: Default + Clone> Shaped for OutMarker<Alloc<E>> {
+    type Shape = AnyShape;
+
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(AnyShape)
+    }
+}
+
+impl<'a, S: Shape, E: Default + Clone> Build for OutMarker<AllocShape<S, E>> {
     type Output = Array<S, Vec<E>>;
 
     fn build(self) -> Option<Self::Output> {
@@ -1320,12 +1369,10 @@ impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Build
     }
 }
 
-impl<
-        'a,
-        S: Shape,
-        S2: Shape + BroadcastIntoNoAlias<S> + BroadcastIntoNoAlias<S2>,
-        E: Default + Clone,
-    > BuildWithShape<S> for OutMarker<AllocShape<S2, E>>
+// Can't Build for Alloc since no shape information is available
+
+impl<'a, S: Shape, S2: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> BuildWithShape<S>
+    for OutMarker<AllocShape<S2, E>>
 {
     type Output = ArrayTarget<S, S2, Vec<E>>;
 
@@ -1344,6 +1391,19 @@ impl<
                 offset: 0,
                 data: vec![E::default(); self_shape.num_elements()],
             },
+        })
+    }
+}
+
+impl<'a, S: Shape, E: Default + Clone> BuildWithShape<S> for OutMarker<Alloc<E>> {
+    type Output = Array<S, Vec<E>>;
+
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+        Some(Array {
+            shape,
+            strides: shape.default_strides(),
+            offset: 0,
+            data: vec![E::default(); shape.num_elements()],
         })
     }
 }
@@ -1393,7 +1453,7 @@ macro_rules! impl_broadcast_builder {
 
         impl<$($A,)*> Build for Broadcast<($($A,)*)>
         where
-            Self: Shaped,
+            Self: Shaped<Shape: Shape>,
             $($A: BuildWithShape<<Self as Shaped>::Shape>,)*
         {
             type Output = ($(<$A as BuildWithShape<<Self as Shaped>::Shape>>::Output,)*);
@@ -1878,8 +1938,12 @@ impl<'a, S: Shape, D: ?Sized> OutTarget for ViewMut<'a, S, D> {
     }
 }
 
-pub struct AllocShape<S: Shape, E> {
+pub struct AllocShape<S, E> {
     shape: S,
+    element: marker::PhantomData<E>,
+}
+
+pub struct Alloc<E> {
     element: marker::PhantomData<E>,
 }
 
@@ -1888,10 +1952,6 @@ pub fn alloc_shape<S: Shape, E>(shape: S) -> AllocShape<S, E> {
         shape,
         element: marker::PhantomData,
     }
-}
-
-pub struct Alloc<E> {
-    element: marker::PhantomData<E>,
 }
 
 pub fn alloc<E>() -> Alloc<E> {
@@ -1991,8 +2051,8 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 mod test {
 
     use crate::{
-        alloc_shape, Array, AsIndex, Broadcast, BroadcastTogether, Build, Const, DefiniteRange,
-        NewAxis, OutMarker, OutTarget, Shape, View,
+        alloc, alloc_shape, Array, AsIndex, Broadcast, BroadcastTogether, Build, Const,
+        DefiniteRange, NewAxis, OutMarker, OutTarget, Shape, View,
     };
 
     #[test]
@@ -2082,7 +2142,7 @@ mod test {
 
         bernstein_coef(&a, &mut b);
 
-        //dbg!(bernstein_coef(&a, alloc())); // TODO
+        dbg!(bernstein_coef(&a, alloc()));
         dbg!(bernstein_coef(&a, alloc_shape((2, 2))));
 
         bernstein_coef(&a, &mut b);
