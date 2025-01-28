@@ -964,74 +964,184 @@ pub trait Shaped {
     fn shape(&self) -> Option<Self::Shape>;
 }
 
-impl<T: IntoView> Shaped for &T {
-    type Shape = T::Shape;
+impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D>> Shaped for &Array<S, D2> {
+    type Shape = S;
 
     fn shape(&self) -> Option<Self::Shape> {
-        Some(IntoView::shape(*self))
+        Some(self.shape)
     }
 }
 
-impl<'a, T: IntoView> Build for &'a T {
-    type Output = View<'a, T::Shape, T::Data>;
+impl<S: Shape, D: ?Sized> Shaped for &View<'_, S, D> {
+    type Shape = S;
 
-    fn build(self) -> Option<Self::Output> {
-        Some(self.view())
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(self.shape)
     }
 }
 
-impl<'a, T: IntoView, S: Shape> BuildWithShape<S> for &'a T
-where
-    T::Shape: BroadcastInto<S>,
-{
-    type Output = View<'a, S, T::Data>;
+impl<S: Shape, D: ?Sized> Shaped for &ViewMut<'_, S, D> {
+    type Shape = S;
 
-    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
-        let view = self.view();
-        if !view.shape.can_broadcast_into(shape) {
-            return None;
-        }
+    fn shape(&self) -> Option<Self::Shape> {
+        Some(self.shape)
+    }
+}
+
+impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D>> Build for &'a Array<S, D2> {
+    type Output = View<'a, S, D>;
+
+    fn build(self) -> Option<View<'a, S, D>> {
         Some(View {
-            shape,
-            offset: view.offset,
-            strides: T::Shape::into_index(view.strides),
-            data: view.data,
+            shape: self.shape,
+            offset: self.offset,
+            strides: self.strides,
+            data: &self.data,
         })
     }
 }
 
-impl<T: IntoViewMut> Shaped for &mut T {
-    type Shape = T::Shape;
-
-    fn shape(&self) -> Option<Self::Shape> {
-        Some(IntoView::shape(*self))
-    }
-}
-
-impl<'a, T: IntoViewMut> Build for &'a mut T {
-    type Output = ViewMut<'a, T::Shape, T::Data>;
-
-    fn build(self) -> Option<Self::Output> {
-        Some(self.view_mut())
-    }
-}
-
-impl<'a, T: IntoViewMut, S: Shape> BuildWithShape<S> for &'a mut T
-where
-    T::Shape: BroadcastIntoNoAlias<S>,
+impl<'a, S: Shape, S2: BroadcastInto<S>, D: ?Sized + 'a, D2: ops::Deref<Target = D>>
+    BuildWithShape<S> for &'a Array<S2, D2>
 {
-    type Output = ViewMut<'a, S, T::Data>;
+    type Output = View<'a, S, D>;
 
     fn build_with_shape(self, shape: S) -> Option<Self::Output> {
-        let view = self.view_mut();
-        if !view.shape.can_broadcast_into(shape) {
+        if !self.shape.can_broadcast_into(shape) {
+            return None;
+        }
+        Some(View {
+            shape,
+            offset: self.offset,
+            strides: S2::into_index(self.strides),
+            data: &self.data,
+        })
+    }
+}
+
+impl<'a, S: Shape, D: ?Sized> Build for &'a View<'a, S, D> {
+    type Output = View<'a, S, D>;
+
+    fn build(self) -> Option<View<'a, S, D>> {
+        Some(View {
+            shape: self.shape,
+            offset: self.offset,
+            strides: self.strides,
+            data: self.data,
+        })
+    }
+}
+
+impl<'a, S: Shape, S2: BroadcastInto<S>, D: ?Sized> BuildWithShape<S> for &'a View<'a, S2, D> {
+    type Output = View<'a, S, D>;
+
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+        if !self.shape.can_broadcast_into(shape) {
+            return None;
+        }
+        Some(View {
+            shape,
+            offset: self.offset,
+            strides: S2::into_index(self.strides),
+            data: self.data,
+        })
+    }
+}
+
+impl<'a, S: Shape, D: ?Sized> Build for &'a ViewMut<'a, S, D> {
+    type Output = View<'a, S, D>;
+
+    fn build(self) -> Option<View<'a, S, D>> {
+        Some(View {
+            shape: self.shape,
+            offset: self.offset,
+            strides: self.strides,
+            data: self.data,
+        })
+    }
+}
+
+impl<'a, S: Shape, S2: BroadcastInto<S>, D: ?Sized> BuildWithShape<S> for &'a ViewMut<'a, S2, D> {
+    type Output = View<'a, S, D>;
+
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+        if !self.shape.can_broadcast_into(shape) {
+            return None;
+        }
+        Some(View {
+            shape,
+            offset: self.offset,
+            strides: S2::into_index(self.strides),
+            data: self.data,
+        })
+    }
+}
+
+impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> Build
+    for &'a mut Array<S, D2>
+{
+    type Output = ViewMut<'a, S, D>;
+
+    fn build(self) -> Option<ViewMut<'a, S, D>> {
+        Some(ViewMut {
+            shape: self.shape.clone(),
+            offset: self.offset,
+            strides: self.strides.clone(),
+            data: &mut self.data,
+        })
+    }
+}
+
+impl<
+        'a,
+        S: Shape,
+        S2: BroadcastIntoNoAlias<S>,
+        D: ?Sized + 'a,
+        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
+    > BuildWithShape<S> for &'a mut Array<S2, D2>
+{
+    type Output = ViewMut<'a, S, D>;
+
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+        if !self.shape.can_broadcast_into(shape) {
             return None;
         }
         Some(ViewMut {
             shape,
-            offset: view.offset,
-            strides: T::Shape::into_index(view.strides),
-            data: view.data,
+            offset: self.offset,
+            strides: S2::into_index(self.strides),
+            data: &mut self.data,
+        })
+    }
+}
+
+impl<'a, S: Shape, D: ?Sized> Build for &'a mut ViewMut<'a, S, D> {
+    type Output = ViewMut<'a, S, D>;
+
+    fn build(self) -> Option<Self::Output> {
+        Some(ViewMut {
+            shape: self.shape,
+            offset: self.offset,
+            strides: self.strides,
+            data: self.data,
+        })
+    }
+}
+
+impl<'a, S: Shape, S2: BroadcastIntoNoAlias<S>, D: ?Sized> BuildWithShape<S>
+    for &'a mut ViewMut<'a, S2, D>
+{
+    type Output = ViewMut<'a, S, D>;
+
+    fn build_with_shape(self, shape: S) -> Option<Self::Output> {
+        if !self.shape.can_broadcast_into(shape) {
+            return None;
+        }
+        Some(ViewMut {
+            shape,
+            offset: self.offset,
+            strides: S2::into_index(self.strides),
+            data: self.data,
         })
     }
 }
@@ -1171,15 +1281,7 @@ impl<
 
 pub struct Broadcast<T>(T);
 
-/*
-pub trait BroadcastTogetherArrays {
-    type Output;
-
-    fn broadcast_together_arrays(self) -> Option<Self::Output>;
-}
-*/
-
-macro_rules! impl_broadcast_together_arrays {
+macro_rules! impl_broadcast_builder {
     () => {
         impl Build for Broadcast<()>
         {
@@ -1253,11 +1355,11 @@ macro_rules! impl_broadcast_together_arrays {
     };
 }
 
-impl_broadcast_together_arrays!();
-impl_broadcast_together_arrays!(a0 A0);
-impl_broadcast_together_arrays!(a0 A0 a1 A1);
-impl_broadcast_together_arrays!(a0 A0 a1 A1 a2 A2);
-impl_broadcast_together_arrays!(a0 A0 a1 A1 a2 A2 a3 A3);
+impl_broadcast_builder!();
+impl_broadcast_builder!(a0 A0);
+impl_broadcast_builder!(a0 A0 a1 A1);
+impl_broadcast_builder!(a0 A0 a1 A1 a2 A2);
+impl_broadcast_builder!(a0 A0 a1 A1 a2 A2 a3 A3);
 
 /////////////////////////////////////////////
 
@@ -1457,138 +1559,6 @@ impl<'a, S: Shape, D: ?Sized> ViewMut<'a, S, D> {
             shape,
             offset: self.offset,
             strides: S::into_index(self.strides),
-            data: self.data,
-        }
-    }
-}
-
-/// This trait marks anything which can represent a read-only view into multi-dimensional data,
-/// such as:
-/// * [Array]
-/// * [View]
-/// * [ViewMut]
-///
-/// Using this trait allows functions to accept any kind of read-only multi-dimensional data. For example:
-/// ```
-/// use nada::IntoView;
-///
-/// // This function can take any dimension input
-/// fn sum(a: &impl IntoView<[f32]>) -> f32 {
-///     let a = a.view(); // Convert to concrete type View
-///
-///     // Iterate and sum
-///     a.into_iter().sum()
-/// }
-/// ```
-///
-/// This `sum` function can now accept `&Array`, `&View`, or `&ViewMut`.
-pub trait IntoView {
-    // The native shape type of this data
-    type Shape: Shape;
-    type Data: ?Sized;
-
-    fn view(&self) -> View<Self::Shape, Self::Data>;
-    fn shape(&self) -> Self::Shape;
-}
-
-impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D>> IntoView for Array<S, D2> {
-    type Shape = S;
-    type Data = D;
-
-    fn shape(&self) -> Self::Shape {
-        self.shape
-    }
-
-    fn view(&self) -> View<S, D> {
-        View {
-            shape: self.shape.clone(),
-            offset: self.offset,
-            strides: self.strides.clone(),
-            data: &self.data,
-        }
-    }
-}
-
-impl<S: Shape, D: ?Sized> IntoView for View<'_, S, D> {
-    type Shape = S;
-    type Data = D;
-
-    fn shape(&self) -> Self::Shape {
-        self.shape
-    }
-
-    fn view(&self) -> View<S, D> {
-        View {
-            shape: self.shape.clone(),
-            offset: self.offset,
-            strides: self.strides.clone(),
-            data: self.data,
-        }
-    }
-}
-
-impl<S: Shape, D: ?Sized> IntoView for ViewMut<'_, S, D> {
-    type Shape = S;
-    type Data = D;
-
-    fn shape(&self) -> Self::Shape {
-        self.shape
-    }
-
-    fn view(&self) -> View<S, D> {
-        View {
-            shape: self.shape.clone(),
-            offset: self.offset,
-            strides: self.strides.clone(),
-            data: self.data,
-        }
-    }
-}
-
-/// This trait marks anything which can represent a mutable view into multi-dimensional data,
-/// such as:
-/// * [Array]
-/// * [ViewMut]
-///
-/// Using this trait allows functions to accept any kind of mutable multi-dimensional data. For example:
-/// ```
-/// use nada::IntoViewMut;
-///
-/// // This function can take any dimension input
-/// fn increment(a: &mut impl IntoViewMut<[f32]>) {
-///     let mut a = a.view_mut(); // Convert to concrete type View
-///
-///     // Iterate and sum
-///     for e in &mut a {
-///         *e += 1.0;
-///     }
-/// }
-/// ```
-///
-/// This `increment` function can now accept `&mut Array` or `&mut ViewMut`.
-pub trait IntoViewMut: IntoView {
-    fn view_mut(&mut self) -> ViewMut<Self::Shape, Self::Data>;
-}
-
-impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> IntoViewMut
-    for Array<S, D2>
-{
-    fn view_mut(&mut self) -> ViewMut<'_, S, D> {
-        ViewMut {
-            shape: self.shape.clone(),
-            offset: self.offset,
-            strides: self.strides.clone(),
-            data: &mut self.data,
-        }
-    }
-}
-
-impl<S: Shape, D: ?Sized> IntoViewMut for ViewMut<'_, S, D> {
-    fn view_mut(&mut self) -> ViewMut<'_, S, D> {
-        ViewMut {
-            shape: self.shape.clone(),
-            offset: self.offset,
-            strides: self.strides.clone(),
             data: self.data,
         }
     }
@@ -1856,6 +1826,10 @@ pub trait IntoTarget {
 /// * Providing a `.output()` method to consume it and produce a return value
 pub trait OutTarget {
     type Output;
+    type Shape: Shape;
+    type Data: ?Sized;
+
+    fn view_mut(&mut self) -> ViewMut<Self::Shape, Self::Data>;
 
     /// Consume this output target and produce its canonical return value
     /// (e.g. `()` for [ViewMut] or [Array] for [ArrayTarget])
@@ -1888,6 +1862,17 @@ impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: ?Sized> IntoTarget for &'a mut V
 
 impl<'a, S: Shape, D: ?Sized> OutTarget for ViewMut<'a, S, D> {
     type Output = ();
+    type Shape = S;
+    type Data = D;
+
+    fn view_mut(&mut self) -> ViewMut<Self::Shape, Self::Data> {
+        ViewMut {
+            shape: self.shape,
+            offset: self.offset,
+            strides: self.strides,
+            data: self.data,
+        }
+    }
 
     fn output(self) -> Self::Output {
         ()
@@ -1917,45 +1902,26 @@ pub struct ArrayTarget<S: Shape, S2: Shape + BroadcastInto<S>, D> {
     shape: S,
 }
 
-impl<S: Shape, S2: Shape + BroadcastInto<S>, D: ?Sized, D2: ops::Deref<Target = D>> IntoView
-    for ArrayTarget<S, S2, D2>
-{
-    type Shape = S;
-    type Data = D;
-
-    fn shape(&self) -> Self::Shape {
-        self.shape
-    }
-
-    fn view(&self) -> View<S, D> {
-        View {
-            shape: self.shape.clone(),
-            offset: self.array.offset,
-            strides: S2::into_index(self.array.strides),
-            data: &self.array.data,
-        }
-    }
-}
-
 impl<
+        'a,
         S: Shape,
         S2: Shape + BroadcastIntoNoAlias<S>,
         D: ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
-    > IntoViewMut for ArrayTarget<S, S2, D2>
+    > OutTarget for ArrayTarget<S, S2, D2>
 {
-    fn view_mut(&mut self) -> ViewMut<'_, S, D> {
+    type Output = Array<S2, D2>;
+    type Shape = S;
+    type Data = D;
+
+    fn view_mut(&mut self) -> ViewMut<S, D> {
         ViewMut {
-            shape: self.shape.clone(),
+            shape: self.shape,
             offset: self.array.offset,
             strides: S2::into_index(self.array.strides),
             data: &mut self.array.data,
         }
     }
-}
-
-impl<'a, S: Shape, S2: Shape + BroadcastIntoNoAlias<S>, D> OutTarget for ArrayTarget<S, S2, D> {
-    type Output = Array<S2, D>;
 
     fn output(self) -> Self::Output {
         self.array
@@ -1981,8 +1947,21 @@ pub fn alloc<E>() -> Alloc<E> {
     }
 }
 
-impl<S: Shape, D> OutTarget for Array<S, D> {
+impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> OutTarget
+    for Array<S, D2>
+{
     type Output = Self;
+    type Shape = S;
+    type Data = D;
+
+    fn view_mut(&mut self) -> ViewMut<S, D> {
+        ViewMut {
+            shape: self.shape,
+            offset: self.offset,
+            strides: self.strides,
+            data: &mut self.data,
+        }
+    }
 
     fn output(self) -> Self::Output {
         self
@@ -2013,7 +1992,7 @@ mod test {
 
     use crate::{
         alloc_shape, Array, AsIndex, Broadcast, BroadcastTogether, Build, Const, DefiniteRange,
-        IntoView, IntoViewMut, NewAxis, OutMarker, OutTarget, Shape, View,
+        NewAxis, OutMarker, OutTarget, Shape, View,
     };
 
     #[test]
@@ -2045,7 +2024,7 @@ mod test {
             numerator / denominator
         }
 
-        fn bernstein_coef<A, B, O: OutTarget + IntoViewMut<Shape = S, Data = [f32]>, S: Shape>(
+        fn bernstein_coef<A, B, O: OutTarget<Shape = S, Data = [f32]>, S: Shape>(
             c_m: &A,
             out: B,
         ) -> O::Output
@@ -2101,8 +2080,7 @@ mod test {
             data: vec![0.; 4],
         };
 
-        bernstein_coef(&a, &mut b.view_mut());
-        bernstein_coef(&a.view(), &mut b);
+        bernstein_coef(&a, &mut b);
 
         //dbg!(bernstein_coef(&a, alloc())); // TODO
         dbg!(bernstein_coef(&a, alloc_shape((2, 2))));
@@ -2139,7 +2117,7 @@ mod test {
 
     #[test]
     fn test_add() {
-        fn add<A, B, C, O: OutTarget + IntoViewMut<Shape = S, Data = [f32]>, S: Shape>(
+        fn add<A, B, C, O: OutTarget<Shape = S, Data = [f32]>, S: Shape>(
             a: &A,
             b: &B,
             out: C,
@@ -2209,7 +2187,7 @@ mod test {
 
     #[test]
     fn test_ones() {
-        fn ones<A, O: OutTarget + IntoViewMut<Data = [f32]>>(out: A) -> O::Output
+        fn ones<A, O: OutTarget<Data = [f32]>>(out: A) -> O::Output
         where
             OutMarker<A>: Build<Output = O>,
         {
