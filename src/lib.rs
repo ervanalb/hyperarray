@@ -1774,52 +1774,6 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 
 /////////////////////////////////////////////
 
-/// This trait marks anything which can serve as an output target for multi-dimensional data.
-///
-/// Using this trait allows functions to store their results in either an existing array
-/// or a newly allocated array, at the discretion of the caller.
-///
-/// Here is an example:
-/// ```
-/// use nada::{IntoTarget, OutTarget, IntoViewMut, Const, alloc_shape};
-///
-/// fn ones<O: IntoTarget<[f32]>>(
-///     out: O,
-/// ) -> <O::Target as OutTarget>::Output {
-///     let mut target = out.build(); // Perform allocation, or no-op for existing data.
-///     let mut a = target.view_mut(); // Get a mutable view of the output target
-///
-///     for e in &mut a {
-///         *e = 1.0;
-///     }
-///
-///     target.output() // Return the allocated array, or () for existing data
-/// }
-///
-/// // Ask the function to allocate the output:
-/// let mut a = ones(alloc_shape((Const::<5>, Const::<6>)));
-///
-/// // Or fill an existing array:
-/// ones(&mut a);
-/// ```
-///
-/// To allocate the output, `alloc_shape()` is required instead of `alloc()`,
-/// because `alloc()` provides no shape information
-/// and none is supplied to `build()`.
-///
-/// If shape information can be supplied to `build()`,
-/// consider using [IntoTargetWithShape] and `build_with_shape()` instead.
-// TODO remove this and replace with a struct!
-pub trait IntoTarget {
-    type Shape: Shape;
-    type Data: ?Sized;
-
-    //type Target: OutTarget + IntoViewMut<Shape = S, Data = Self::Data>;
-
-    fn shape(&self) -> Self::Shape;
-    //fn build(self) -> Self::Target;
-}
-
 /// The inetermediate representation of output data.
 /// This generally serves two purposes:
 /// * Providing a `.view_mut()` method to which data can be written
@@ -1834,30 +1788,6 @@ pub trait OutTarget {
     /// Consume this output target and produce its canonical return value
     /// (e.g. `()` for [ViewMut] or [Array] for [ArrayTarget])
     fn output(self) -> Self::Output;
-}
-
-impl<
-        'a,
-        S: Shape + BroadcastIntoNoAlias<S>,
-        D: 'a + ?Sized,
-        D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
-    > IntoTarget for &'a mut Array<S, D2>
-{
-    type Shape = S;
-    type Data = D;
-
-    fn shape(&self) -> Self::Shape {
-        self.shape
-    }
-}
-
-impl<'a, S: Shape + BroadcastIntoNoAlias<S>, D: ?Sized> IntoTarget for &'a mut ViewMut<'a, S, D> {
-    type Shape = S;
-    type Data = D;
-
-    fn shape(&self) -> Self::Shape {
-        self.shape
-    }
 }
 
 impl<'a, S: Shape, D: ?Sized> OutTarget for ViewMut<'a, S, D> {
@@ -1891,12 +1821,21 @@ pub fn alloc_shape<S: Shape, E>(shape: S) -> AllocShape<S, E> {
     }
 }
 
+pub struct Alloc<E> {
+    element: marker::PhantomData<E>,
+}
+
+pub fn alloc<E>() -> Alloc<E> {
+    Alloc {
+        element: marker::PhantomData,
+    }
+}
+
 /// An output target wrapping an owned [Array],
 /// that when viewed has a different (but equal) shape
 /// than the underlying `Array`.
 ///
 /// This should never need to be constructed directly
-/// (see [IntoTarget])
 pub struct ArrayTarget<S: Shape, S2: Shape + BroadcastInto<S>, D> {
     array: Array<S2, D>,
     shape: S,
@@ -1928,6 +1867,7 @@ impl<
     }
 }
 
+/*
 impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> IntoTarget for AllocShape<S, E> {
     type Shape = S;
     type Data = [E];
@@ -1936,16 +1876,7 @@ impl<'a, S: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> IntoTarget for 
         self.shape
     }
 }
-
-pub struct Alloc<E> {
-    element: marker::PhantomData<E>,
-}
-
-pub fn alloc<E>() -> Alloc<E> {
-    Alloc {
-        element: marker::PhantomData,
-    }
-}
+*/
 
 impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> OutTarget
     for Array<S, D2>
