@@ -2176,16 +2176,15 @@ mod test {
             numerator / denominator
         }
 
-        fn bernstein_coef<A, B, O: OutTarget<Shape = S, Data = [f32]>, S: Shape>(
+        fn bernstein_coef<A, B, O: OutTarget<Shape = S, Data = [f32]>, S: Shape, E>(
             c_m: &A,
             out: B,
-        ) -> O::Output
+        ) -> Result<O::Output, E>
         where
-            for<'a> Broadcast<(&'a A, OutMarker<B>)>: Build<Output = (View<'a, S, [f32]>, O)>,
+            for<'a> Broadcast<(&'a A, OutMarker<B>)>:
+                Build<Output = (View<'a, S, [f32]>, O), Error = E>,
         {
-            let (c_m, mut out_target) = Broadcast((c_m, OutMarker(out)))
-                .build()
-                .expect("Could not broadcast arrays together");
+            let (c_m, mut out_target) = Broadcast((c_m, OutMarker(out))).build()?;
             let mut out = out_target.view_mut();
 
             // XXX
@@ -2213,7 +2212,7 @@ mod test {
                     .sum();
             }
 
-            out_target.output()
+            Ok(out_target.output())
         }
 
         // TEST DATA
@@ -2232,29 +2231,28 @@ mod test {
             data: vec![0.; 4],
         };
 
-        bernstein_coef(&a, &mut b);
+        bernstein_coef(&a, &mut b).unwrap();
 
-        dbg!(bernstein_coef(&a, alloc()));
-        dbg!(bernstein_coef(&a, alloc_shape((2, 2))));
+        dbg!(bernstein_coef(&a, alloc()).unwrap());
+        dbg!(bernstein_coef(&a, alloc_shape((2, 2))).unwrap());
 
-        bernstein_coef(&a, &mut b);
+        bernstein_coef(&a, &mut b).unwrap();
     }
 
     #[test]
     fn test_sum_prod() {
-        fn sum_prod<A, B, S: Shape>(in1: &A, in2: &B) -> f32
+        fn sum_prod<A, B, S: Shape, E>(in1: &A, in2: &B) -> Result<f32, E>
         where
             for<'a> Broadcast<(&'a A, &'a B)>:
-                Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>)>,
+                Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>), Error = E>,
         {
-            let (in1, in2) = Broadcast((in1, in2))
-                .build()
-                .expect("Arrays cannot be broadcast together");
+            let (in1, in2) = Broadcast((in1, in2)).build()?;
 
-            in1.into_iter()
+            Ok(in1
+                .into_iter()
                 .zip(in2.into_iter())
                 .map(|(a, b)| a * b)
-                .sum()
+                .sum())
         }
 
         let a = Array {
@@ -2264,30 +2262,28 @@ mod test {
             data: vec![1., 2., 3., 4.],
         };
 
-        sum_prod(&a, &a);
+        sum_prod(&a, &a).unwrap();
     }
 
     #[test]
     fn test_add() {
-        fn add<A, B, C, O: OutTarget<Shape = S, Data = [f32]>, S: Shape>(
+        fn add<A, B, C, O: OutTarget<Shape = S, Data = [f32]>, S: Shape, E>(
             a: &A,
             b: &B,
             out: C,
-        ) -> O::Output
+        ) -> Result<O::Output, E>
         where
             for<'a> Broadcast<(&'a A, &'a B, OutMarker<C>)>:
-                Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>, O)>,
+                Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>, O), Error = E>,
         {
-            let (a, b, mut out_target) = Broadcast((a, b, OutMarker(out)))
-                .build()
-                .expect("Arrays cannot be broadcast together");
+            let (a, b, mut out_target) = Broadcast((a, b, OutMarker(out))).build()?;
             let mut out = out_target.view_mut();
 
             for (out, (a, b)) in (&mut out).into_iter().zip(a.into_iter().zip(b.into_iter())) {
                 *out = a + b;
             }
 
-            out_target.output()
+            Ok(out_target.output())
         }
 
         let a = Array {
@@ -2311,7 +2307,7 @@ mod test {
             data: vec![0.; 8],
         };
 
-        add(&a, &b, &mut c);
+        add(&a, &b, &mut c).unwrap();
 
         assert_eq!(c.data, [11., 12., 21., 22., 11., 12., 21., 22.]);
     }
@@ -2366,13 +2362,8 @@ mod test {
 
     #[test]
     fn test_broadcast() {
-        assert_eq!(
-            ((Const::<3>, Const::<4>), (Const::<3>, Const::<4>))
-                .broadcast_together()
-                .unwrap()
-                .as_index(),
-            [3, 4]
-        );
+        let Ok(s) = ((Const::<3>, Const::<4>), (Const::<3>, Const::<4>)).broadcast_together();
+        assert_eq!(s.as_index(), [3, 4]);
         assert_eq!(
             ((Const::<3>, Const::<4>), (Const::<3>, 4))
                 .broadcast_together()
@@ -2394,13 +2385,8 @@ mod test {
             .broadcast_together()
             .is_err());
 
-        assert_eq!(
-            ((Const::<3>, Const::<4>), ())
-                .broadcast_together()
-                .unwrap()
-                .as_index(),
-            [3, 4]
-        );
+        let Ok(s) = ((Const::<3>, Const::<4>), ()).broadcast_together();
+        assert_eq!(s.as_index(), [3, 4]);
         assert_eq!(
             ((Const::<3>, Const::<4>), (4,))
                 .broadcast_together()
