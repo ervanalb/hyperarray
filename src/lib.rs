@@ -1,9 +1,17 @@
 use std::convert;
+use std::error;
 use std::fmt;
 use std::marker;
 use std::ops;
 
-/// Represents an axis of unit length that can be broadcast to any size.
+/// A marker used in place of a concrete [Shape]
+/// to indicate that any valid shape can be substituted.
+/// This is used e.g. for a lazily allocate output array
+/// appearing in a collection of parameters that are broadcast together.
+#[derive(Clone, Copy, Debug)]
+pub struct AnyShape;
+
+/// In a [Shape] tuple, this represents an axis of unit length that can be broadcast to any size.
 #[derive(Default, Clone, Copy)]
 pub struct NewAxis;
 
@@ -13,7 +21,7 @@ impl fmt::Debug for NewAxis {
     }
 }
 
-/// Represents an axis length known at compile time.
+/// In a [Shape] tuple, this represents an axis length known at compile time.
 /// The primitive type `usize` is used for a dimension not known at compile time,
 /// or [NewAxis] for a unit-length broadcastable axis.
 /// (Unlike with NumPy, an axis length `Const::<1>` or `1_usize` will not broadcast)
@@ -26,14 +34,13 @@ impl<const N: usize> fmt::Debug for Const<N> {
     }
 }
 
-#[derive(Debug)]
+/// An error value that is returned when two shapes could not be broadcast together.
+/// This type is generally returned in the `Err` variant of a `Result`
+/// if the broadcasting operation has a chance of failing at runtime.
+/// If the broadcasting operation cannot fail at runtime, the `Err` type will be [std::convert::Infallible]
+#[derive(thiserror::Error, Debug)]
+#[error("Broadcast error: axis length mismatch {0} != {1}")]
 pub struct BroadcastError(pub usize, pub usize);
-
-pub trait BroadcastInto<T> {
-    type Error: fmt::Debug;
-
-    fn can_broadcast_into(self, other: T) -> Result<(), Self::Error>;
-}
 
 impl From<convert::Infallible> for BroadcastError {
     fn from(value: convert::Infallible) -> Self {
@@ -41,20 +48,93 @@ impl From<convert::Infallible> for BroadcastError {
     }
 }
 
-pub trait BroadcastIntoShape<T: Shape>: Shape + BroadcastInto<T> {
-    fn into_index(index: Self::Index) -> T::Index;
+/// A [Shape] (or placeholder such as [AnyShape])
+/// which can be broadcast into the given shape
+/// (or placeholder.)
+/// For a version of this trait which requires concrete shapes,
+/// use [BroadcastIntoConcrete].
+pub trait BroadcastInto<T> {
+    /// The error type for if the given shape is not compatible at runtime.
+    /// If the broadcasting operation cannot fail at runtime, this will be [std::convert::Infallible]
+    /// If the broadcasting operation has a chance of failing at runtime,
+    /// this will be [BroadcastError].
+    type Error: error::Error;
+
+    /// Check if the broadcast can be performed.
+    /// If `Ok(())` is returned, it means that `self` can be broadcast to `other`.
+    fn check_broadcast_into(self, other: T) -> Result<(), Self::Error>;
 }
 
+/// A [Shape] which can be broadcast into the given shape.
+/// This specializes [BroadcastInto] for concrete shapes,
+/// providing an index conversion method.
+pub trait BroadcastIntoConcrete<T: Shape>: Shape + BroadcastInto<T> {
+    // Convert an index into an array whose shape is `Self`
+    // into an index for an array whose shape is `T`.
+    //
+    // This function does not depend on the actual shape values,
+    // only their types.
+    fn convert_index(index: Self::Index) -> T::Index;
+}
+
+/// A [Shape] (or placeholder such as [AnyShape])
+/// which can be broadcast into the given shape
+/// (or placeholder)
+/// without aliasing.
+/// This generally means that the shapes are equivalent
+/// since any non-trivial broadcast creates aliasing.
+/// However, this should be preferred for a few reasons:
+/// * No two given shapes should be assumed the same type,
+///   even if they are equivalent.
+///   For instance, `(2, 2)` and `(NewAxis, Const::<2>, Const::<2>)`
+///   are not the same type, but are equivalent,
+///   and can be broadcast without aliasing.
+/// * `AnyShape`, a marker used to indicate that any valid shape can be substituted,
+///   can broadcast into any shape without aliasing.
+///   This is used e.g. when lazily allocating output arrays.
 pub trait BroadcastIntoNoAlias<T>: BroadcastInto<T> {}
 
+/// A [Shape] (or placeholder such as [AnyShape])
+/// which can be broadcast with the given shape
+/// to form a third, possibly new shape,
+/// that is compatible with both.
+/// Unlike [BroadcastInto],
+/// * this relation is symmetric:
+///   `a.broadcast_with(b)` should return the same as `b.broadcast_with(a)`.
+/// * this relation may return a shape that is distinct from both of its inputs
+///
+/// Prefer using [BroadcastTogether].
 pub trait BroadcastWith<T: BroadcastInto<Self::Output>>: BroadcastInto<Self::Output> {
+    // The type of the resulting shape (or placeholder such as [AnyShape])
     type Output;
-    type WithError: fmt::Debug;
 
+    /// The error type for if the given shapes are not compatible at runtime.
+    /// If the broadcasting operation cannot fail at runtime, this will be [std::convert::Infallible]
+    /// If the broadcasting operation has a chance of failing at runtime,
+    /// this will be [BroadcastError].
+    type WithError: error::Error;
+
+    // Perform the broadcast
     fn broadcast_with(self, other: T) -> Result<Self::Output, Self::WithError>;
 }
 
-// Broadcast
+/// A set of [Shapes](Shape) (or placeholders such as [AnyShape])
+/// which can be broadcast together
+/// to form a new shape that is compatible with all.
+///
+/// Unlike [BroadcastInto],
+/// * this relation is symmetric:
+///   `(a, b).broadcast_together()` should return the same as `(b, a).broadcast_with()`.
+/// * this relation may return a shape that is distinct from all of its inputs
+///
+/// This is a generalization of [BroadcastWith]
+/// to any number of inputs, and should be preferred.
+pub trait BroadcastTogether {
+    type Output;
+    type Error: error::Error;
+
+    fn broadcast_together(self) -> Result<Self::Output, Self::Error>;
+}
 
 /// A trait indicating that a type can be viewed as an [Index].
 ///
@@ -81,28 +161,36 @@ pub trait AsIndex {
     fn as_index(&self) -> Self::Index;
 }
 
-/// Represents length of each axis of multi-dimensional data.
-/// This may be a tuple of [Dim], i.e. `usize` / `Const<N>`,
-/// or a fixed-length array of `usize`.
-/// Each element corresponds to one axis length.
+/// A tuple where each element represents the length of an axis of multi-dimensional data.
+/// Each entry may be:
+/// * [Const<N>](Const), indicating that the length is known at compile-time
+/// * `usize`, indicating that the length is not known at compile-time
+/// * [NewAxis], indicating an axis of unit length that can be broadcast to any size.
 ///
-/// ```
-/// // Several shape representations that are equivalent:
+/// // TODO write a shape example
 ///
-/// use nada::{Const, ShapeEq};
+/// `NewAxis` is used to build shapes for data that only varies in some axes.
+/// For example, a 1D row vector with length 5 may have shape `(5)`,
+/// while a 1D column vector with length 5 may have shape `(5, NewAxis)`.
+/// In both cases, since the data is 1-dimensional, the [index](Index) would be `[usize; 1]`.
+/// But when broadcast together, the result is shape `(5, 5)` with a 2D index.
 ///
-/// let s = (Const::<3>, Const::<4>);
+/// Note that unlike NumPy, `1_usize` / `Const<1>` will not broadcast.
 ///
-/// assert!(s.shape_eq(&(Const::<3>, Const::<4>)));
-/// assert!(s.shape_eq(&(Const::<3>, 4)));
-/// assert!(s.shape_eq(&(3, 4)));
-/// ```
+/// Shapes are assumed to be prefixed
+/// with an indefinite set of `NewAxis`.
+/// For example, the following shapes are equivalent for all intents and purposes:
+/// * `(5)`
+/// * `(NewAxis, 5)`
+/// * `(NewAxis, NewAxis, 5)`
+/// It is discouraged to include `NewAxis` prefixes since they are implied.
 ///
 /// Since there are multiple equivalent `Shape` representations,
 /// **no two shapes should be assumed to be the same type**.
-/// // TODO explain how to write a "same shape" type bound
-/// ```
-pub trait Shape: 'static + Sized + Clone + Copy + AsIndex + fmt::Debug {
+/// For instance, `(2, 2)` and `(NewAxis, Const::<2>, Const::<2>)`
+/// are not the same type, but are equivalent for all computational purposes.
+/// For writing type bounds that enforce shape compatibility, see [Broadcast].
+pub trait Shape: 'static + Sized + Clone + Copy + AsIndex + fmt::Debug + CalculateShape {
     // Provided methods
 
     /// How many total elements are contained within multi-dimensional data
@@ -158,53 +246,6 @@ pub trait Shape: 'static + Sized + Clone + Copy + AsIndex + fmt::Debug {
             }
         }
     }
-
-    /// Tries to broadcast the two shapes together, and panics if it fails.
-    ///
-    /// Fails to compile if the two shape types could never be broadcast together,
-    /// such as `(Const::<2>,)` and `(Const::<3>,)`
-    ///
-    /// ```
-    /// use nada::{Const, Shape};
-    ///
-    /// let shape1 = (Const::<2>, Const::<3>);
-    /// let shape2 = (2, 3);
-    /// let shape3 = (3,);
-    /// let _b1 = shape1.broadcast_together_fail(shape2); // No panic since the shapes are equal
-    /// let _b2 = shape1.broadcast_together_fail(shape3); // No panic since the shapes are compatible
-    /// // TODO show the contents of b1 and b2
-    /// ```
-    fn broadcast_together_fail<S: Shape + BroadcastInto<Self::Output>>(
-        self,
-        other: S,
-    ) -> Self::Output
-    where
-        Self: BroadcastWith<S>,
-    {
-        self.broadcast_with(other).unwrap()
-    }
-
-    /// Tries to broadcast one shape into another, and panics if it fails.
-    ///
-    /// Fails to compile if the shape could never be broadcast into the given one,
-    /// such as `(Const::<2>,)` and `(Const::<3>,)`
-    ///
-    /// ```
-    /// use nada::{Const, Shape};
-    ///
-    /// let shape1 = (Const::<2>, Const::<3>);
-    /// let shape2 = (2, 3);
-    /// let shape3 = (10, 2, 3);
-    /// let _b1 = shape1.broadcast_into_fail(shape2); // No panic since the shapes are equal
-    /// let _b2 = shape1.broadcast_into_fail(shape3); // No panic since the shapes are compatible
-    /// // TODO show the contents of b1 and b2
-    /// ```
-    fn broadcast_into_fail<S: Shape>(self, other: S)
-    where
-        Self: BroadcastInto<S>,
-    {
-        self.can_broadcast_into(other).unwrap()
-    }
 }
 
 /// Represents the coordinates of an element in multi-dimensional data,
@@ -212,7 +253,12 @@ pub trait Shape: 'static + Sized + Clone + Copy + AsIndex + fmt::Debug {
 /// Each element corresponds to the index along that axis.
 ///
 /// Unlike [Shape], the coordinates of an `Index` are always type `usize`.
-/// Every `Shape` type has a corresponding `Index` type
+/// Every `Shape` type has a corresponding `Index` type.
+///
+/// Note that unlike NumPy, an array's `Shape` tuple may have more elements than its `Index` array.
+/// This is because axes whose length is [NewAxis] are not included in the index.
+/// For example, a column vector with shape `(5, NewAxis)` is indexed by `[usize; 1]`
+/// (since it is one-dimensional.)
 pub trait Index:
     'static
     + Sized
@@ -224,6 +270,7 @@ pub trait Index:
     + AsIndex<Index = Self>
 {
     // Required methods
+    /// The index of the first element in all axes (an index containing all zeros.)
     fn zero() -> Self;
 
     /// Converts this multi-dimensional index into a linear index
@@ -260,7 +307,6 @@ pub trait Index:
     ///
     /// assert_eq!(i, [6, 10]);
     /// ```
-    // TODO use into_iter for mutable iteration too?
     fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, usize>;
 }
 
@@ -283,17 +329,114 @@ impl<const N: usize> Index for [usize; N] {
 }
 
 /////////////////////////////////////////////
-// Private helper trait for fixed-length array building
 
+/// Build this value into a [View] or similar representation
+/// suitable for processing.
+///
+/// This trait is generally used to help bound generic function parameters.
+/// For example, here is a function which takes multi-dimensional data
+/// that is in-memory, has element type `f32`, and could be any shape.
+///
+/// The user may pass:
+/// * `&Array`
+/// * `&ViewMut`
+/// * `&View`
+/// at their convenience.
+/// ```
+/// use nada::{Build, View, Shape};
+/// use std::convert::Infallible;
+///
+/// fn foo<A, S: Shape>(a: &A)
+/// where
+///     for<'a> &'a A: Build<Output = View<'a, S, [f32]>, Error=Infallible>,
+/// {
+///     let Ok(a) = a.build();
+///
+///     // Do stuff with `a`
+/// }
+/// ```
+///
+/// In the previous simple example, building one of these types into its native shape is infallible,
+/// but more generally, the `build()` call may fail at runtime.
+///
+/// This second example takes two parameters whose shapes must be broadcastable together.
+/// The two [View] instances returned by `build()` will have the same shape `S`,
+/// which is the result of the broadcast,
+/// allowing them to be zipped or otherwise iterated together.
+///
+/// ```
+/// use nada::{Build, View, Broadcast, Shape};
+/// use std::convert::Infallible;
+///
+/// fn foo<A, B, S: Shape, E>(a: &A, b: &B) -> Result<(), E>
+/// where
+///     for<'a> Broadcast<(&'a A, &'a B)>: Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>), Error=E>,
+/// {
+///     let (a, b) = Broadcast((a, b)).build()?;
+///
+///     // Do stuff with `a` and `b`
+///     // which are guaranteed to have the same shape
+///
+///     Ok(())
+/// }
+/// ```
+///
+pub trait Build {
+    type Output;
+    type Error: error::Error;
+
+    // Calculate shapes & construct the resulting view(s) (or other representations.)
+    fn build(self) -> Result<Self::Output, Self::Error>;
+}
+
+/// Calculate the shape of this value.
+///
+/// This trait is for internal use only,
+/// as part of the two-step [Build] process:
+/// 1. Compute shapes (e.g. via broadcasting) (this trait)
+/// 2. Create views or other representations with the computed shape ([BuildWithShape])
+pub trait CalculateShape {
+    type Shape;
+    type Error: error::Error;
+
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error>;
+}
+
+/// Build this value into a [View] or similar representation
+/// with the given shape.
+///
+/// This trait is for internal use only,
+/// as part of the two-step [Build] process:
+/// 1. Compute shapes (e.g. via broadcasting) ([CalculateShape])
+/// 2. Create views or other representations with the computed shape (this trait)
+pub trait BuildWithShape<S: Shape> {
+    type Output;
+    type Error: error::Error;
+
+    fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error>;
+}
+
+/// A wrapper indicating that the wrapped value should be [built](Build) into an output target.
+struct Out<T>(T);
+
+pub struct Broadcast<T>(pub T);
+
+/////////////////////////////////////////////
+// Helper trait for fixed-length array building
+
+/// This fixed-length array can be grown by 1 element
 pub trait Push {
     type OneBigger: Pop<OneSmaller = Self>;
 
+    /// Return this array with the given element added to the end
     fn append(self, a: usize) -> Self::OneBigger;
 }
 
+/// This fixed-length array can be shrunk by 1 element
 pub trait Pop {
     type OneSmaller: Push<OneBigger = Self>;
 
+    /// Return the array with its last element split off
     fn split(self) -> (Self::OneSmaller, usize);
 }
 
@@ -323,17 +466,21 @@ impl_push_pop!(2, 0 1);
 impl_push_pop!(3, 0 1 2);
 impl_push_pop!(4, 0 1 2 3);
 
+/// This tuple can be grown by 1 element
 pub trait TuplePush {
-    type OneBigger<A>: TuplePop<Head = A, OneSmaller = Self>;
+    type OneBigger<A>: TuplePop<Tail = A, OneSmaller = Self>;
 
+    /// Return this tuple with the given element added to the end
     fn append<A>(self, a: A) -> Self::OneBigger<A>;
 }
 
+/// This tuple can be shrunk by 1 element
 pub trait TuplePop {
-    type Head;
-    type OneSmaller: TuplePush<OneBigger<Self::Head> = Self>;
+    type Tail;
+    type OneSmaller: TuplePush<OneBigger<Self::Tail> = Self>;
 
-    fn split(self) -> (Self::OneSmaller, Self::Head);
+    /// Return the tuple with its last element split off
+    fn split(self) -> (Self::OneSmaller, Self::Tail);
 }
 
 macro_rules! impl_tuple_push_pop {
@@ -348,10 +495,10 @@ macro_rules! impl_tuple_push_pop {
         }
 
         impl<$($A,)* A,> TuplePop for ($($A,)* A,) {
-            type Head = A;
+            type Tail = A;
             type OneSmaller = ($($A,)*);
 
-            fn split(self) -> (Self::OneSmaller, Self::Head) {
+            fn split(self) -> (Self::OneSmaller, Self::Tail) {
                 let ($($a,)* a,) = self;
                 (($($a,)*), a)
             }
@@ -371,15 +518,15 @@ impl Shape for () {}
 macro_rules! impl_shape {
     ($($a:ident $A:ident)*) => {
         impl<$($A,)* const N: usize,> Shape for ($($A,)* Const<N>,)
-            where ($($A,)* Const<N>,): 'static + Copy + fmt::Debug + AsIndex
+            where ($($A,)* Const<N>,): 'static + Copy + fmt::Debug + AsIndex + CalculateShape
         {}
 
         impl<$($A,)*> Shape for ($($A,)* usize,)
-            where ($($A,)* usize,): 'static + Copy + fmt::Debug + AsIndex
+            where ($($A,)* usize,): 'static + Copy + fmt::Debug + AsIndex + CalculateShape
         {}
 
         impl<$($A,)*> Shape for ($($A,)* NewAxis,)
-            where ($($A,)* NewAxis,): 'static + Copy + fmt::Debug + AsIndex
+            where ($($A,)* NewAxis,): 'static + Copy + fmt::Debug + AsIndex + CalculateShape
         {}
     };
 }
@@ -444,20 +591,93 @@ impl_as_index!();
 impl_as_index!(a0 A0);
 impl_as_index!(a0 A0 a1 A1);
 
+// CalculateShape
+
+impl CalculateShape for () {
+    type Shape = Self;
+    type Error = convert::Infallible;
+
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
+        Ok(*self)
+    }
+}
+
+macro_rules! impl_shaped {
+    ($($a:ident $A:ident)*) => {
+
+        impl<$($A: Copy,)* const N: usize, > CalculateShape for ($($A,)* Const<N>,)
+        where
+            ($($A,)*): CalculateShape,
+        {
+            type Shape = Self;
+            type Error = convert::Infallible;
+
+            fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
+                Ok(*self)
+            }
+        }
+
+
+        impl<$($A: Copy,)*> CalculateShape for ($($A,)* usize,)
+        where
+            ($($A,)*): CalculateShape,
+        {
+            type Shape = Self;
+            type Error = convert::Infallible;
+
+            fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
+                Ok(*self)
+            }
+        }
+
+        impl<$($A: Copy,)*> CalculateShape for ($($A,)* NewAxis,)
+        where
+            ($($A,)*): CalculateShape,
+        {
+            type Shape = Self;
+            type Error = convert::Infallible;
+
+            fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
+                Ok(*self)
+            }
+        }
+    };
+}
+
+impl_shaped!();
+impl_shaped!(a0 A0);
+impl_shaped!(a0 A0 a1 A1);
+
 impl BroadcastInto<()> for () {
     type Error = convert::Infallible;
 
-    fn can_broadcast_into(self, _other: ()) -> Result<(), Self::Error> {
+    fn check_broadcast_into(self, _other: ()) -> Result<(), Self::Error> {
         Ok(())
     }
 }
 
-impl BroadcastIntoShape<()> for () {
-    fn into_index(_index: [usize; 0]) -> [usize; 0] {
+impl BroadcastIntoConcrete<()> for () {
+    fn convert_index(_index: [usize; 0]) -> [usize; 0] {
         []
     }
 }
 impl BroadcastIntoNoAlias<()> for () {}
+
+impl BroadcastInto<AnyShape> for AnyShape {
+    type Error = convert::Infallible;
+    fn check_broadcast_into(self, _other: AnyShape) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl BroadcastIntoNoAlias<AnyShape> for AnyShape {}
+
+impl<S: Shape> BroadcastInto<S> for AnyShape {
+    type Error = convert::Infallible;
+    fn check_broadcast_into(self, _other: S) -> Result<(), Self::Error> {
+        Ok(())
+    }
+}
+impl<S: Shape> BroadcastIntoNoAlias<S> for AnyShape {}
 
 macro_rules! impl_broadcast_into_a {
     ($($a:ident $A:ident)*) => {
@@ -465,23 +685,23 @@ macro_rules! impl_broadcast_into_a {
             where ($($A,)*): BroadcastInto<()>,
         {
             type Error = <($($A,)*) as BroadcastInto<()>>::Error;
-            fn can_broadcast_into(self, _other: ()) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, _other: ()) -> Result<(), Self::Error> {
                 let ($($a,)* _,) = self;
-                ($($a,)*).can_broadcast_into(())
+                ($($a,)*).check_broadcast_into(())
             }
         }
 
         impl<$($A: Copy + fmt::Debug,)*> BroadcastIntoNoAlias<()> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<()>,
+            where ($($A,)*): BroadcastIntoConcrete<()>,
             ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
         {}
 
-        impl<$($A: Copy + fmt::Debug,)*> BroadcastIntoShape<()> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<()>,
+        impl<$($A: Copy + fmt::Debug,)*> BroadcastIntoConcrete<()> for ($($A,)* NewAxis,)
+            where ($($A,)*): BroadcastIntoConcrete<()>,
             ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
         {
-            fn into_index(index: <($($A,)*) as AsIndex>::Index) -> <() as AsIndex>::Index {
-                <($($A,)*) as BroadcastIntoShape<()>>::into_index(index)
+            fn convert_index(index: <($($A,)*) as AsIndex>::Index) -> <() as AsIndex>::Index {
+                <($($A,)*) as BroadcastIntoConcrete<()>>::convert_index(index)
             }
         }
     };
@@ -499,9 +719,9 @@ macro_rules! impl_broadcast_into_b {
             ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
         {
             type Error = <() as BroadcastInto<($($B,)*)>>::Error;
-            fn can_broadcast_into(self, other: ($($B,)* NewAxis,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* NewAxis,)) -> Result<(), Self::Error> {
                 let ($($b,)* _,) = other;
-                ().can_broadcast_into(($($b,)*))
+                ().check_broadcast_into(($($b,)*))
             }
         }
         impl<$($B,)*> BroadcastIntoNoAlias<($($B,)* NewAxis,)> for ()
@@ -510,13 +730,13 @@ macro_rules! impl_broadcast_into_b {
             ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
         {}
 
-        impl<$($B,)*> BroadcastIntoShape<($($B,)* NewAxis,)> for ()
-            where (): BroadcastIntoShape<($($B,)*)>,
+        impl<$($B,)*> BroadcastIntoConcrete<($($B,)* NewAxis,)> for ()
+            where (): BroadcastIntoConcrete<($($B,)*)>,
             ($($B,)*): Shape,
             ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
         {
-            fn into_index(index: [usize; 0]) -> <($($B,)*) as AsIndex>::Index {
-                <() as BroadcastIntoShape<($($B,)*)>>::into_index(index)
+            fn convert_index(index: [usize; 0]) -> <($($B,)*) as AsIndex>::Index {
+                <() as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index)
             }
         }
 
@@ -526,20 +746,20 @@ macro_rules! impl_broadcast_into_b {
             ($($B,)* Const<N>,): Shape,
         {
             type Error = <() as BroadcastInto<($($B,)*)>>::Error;
-            fn can_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
                 let ($($b,)* _,) = other;
-                ().can_broadcast_into(($($b,)*))
+                ().check_broadcast_into(($($b,)*))
             }
         }
         //impl<const N: usize> BroadcastIntoNoAlias<(S2, Const<N>)> for ()
         //{ ! }
-        impl<const N: usize, $($B,)*> BroadcastIntoShape<($($B,)* Const<N>,)> for ()
-            where (): BroadcastIntoShape<($($B,)*)>,
+        impl<const N: usize, $($B,)*> BroadcastIntoConcrete<($($B,)* Const<N>,)> for ()
+            where (): BroadcastIntoConcrete<($($B,)*)>,
             ($($B,)*): Shape<Index: Push<OneBigger=<($($B,)* Const<N>,) as AsIndex>::Index>>,
             ($($B,)* Const<N>,): Shape,
         {
-            fn into_index(index: [usize; 0]) -> <($($B,)* Const<N>,) as AsIndex>::Index {
-                <() as BroadcastIntoShape<($($B,)*)>>::into_index(index).append(0)
+            fn convert_index(index: [usize; 0]) -> <($($B,)* Const<N>,) as AsIndex>::Index {
+                <() as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index).append(0)
             }
         }
 
@@ -549,20 +769,20 @@ macro_rules! impl_broadcast_into_b {
             ($($B,)* usize,): Shape,
         {
             type Error = <() as BroadcastInto<($($B,)*)>>::Error;
-            fn can_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
                 let ($($b,)* _,) = other;
-                ().can_broadcast_into(($($b,)*))
+                ().check_broadcast_into(($($b,)*))
             }
         }
         //impl BroadcastIntoNoAlias<(S2, usize)> for ()
         //{ ! }
-        impl<$($B,)*> BroadcastIntoShape<($($B,)* usize,)> for ()
-            where (): BroadcastIntoShape<($($B,)*)>,
+        impl<$($B,)*> BroadcastIntoConcrete<($($B,)* usize,)> for ()
+            where (): BroadcastIntoConcrete<($($B,)*)>,
             ($($B,)*): Shape<Index: Push<OneBigger=<($($B,)* usize,) as AsIndex>::Index>>,
             ($($B,)* usize,): Shape,
         {
-            fn into_index(index: [usize; 0]) -> <($($B,)* usize,) as AsIndex>::Index {
-                <() as BroadcastIntoShape<($($B,)*)>>::into_index(index).append(0)
+            fn convert_index(index: [usize; 0]) -> <($($B,)* usize,) as AsIndex>::Index {
+                <() as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index).append(0)
             }
         }
     };
@@ -575,129 +795,129 @@ impl_broadcast_into_b!(b0 B0 b1 B1);
 macro_rules! impl_broadcast_into_ab {
     ($($a:ident $A:ident)*, $($b:ident $B:ident)*) => {
         impl<$($A,)* $($B,)*> BroadcastInto<($($B,)* NewAxis,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
         {
             type Error = <($($A,)*) as BroadcastInto<($($B,)*)>>::Error;
-            fn can_broadcast_into(self, other: ($($B,)* NewAxis,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* NewAxis,)) -> Result<(), Self::Error> {
                 let ($($a,)* _,) = self;
                 let ($($b,)* _,) = other;
-                ($($a,)*).can_broadcast_into(($($b,)*))
+                ($($a,)*).check_broadcast_into(($($b,)*))
             }
 
         }
         impl<$($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* NewAxis,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
         {}
-        impl<$($A,)* $($B,)*> BroadcastIntoShape<($($B,)* NewAxis,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<($($B,)*)>,
+        impl<$($A,)* $($B,)*> BroadcastIntoConcrete<($($B,)* NewAxis,)> for ($($A,)* NewAxis,)
+            where ($($A,)*): BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* NewAxis,): Shape<Index=<($($B,)*) as AsIndex>::Index>,
         {
-            fn into_index(index: <($($A,)* NewAxis,) as AsIndex>::Index) -> <($($B,)*) as AsIndex>::Index {
-                <($($A,)*) as BroadcastIntoShape<($($B,)*)>>::into_index(index)
+            fn convert_index(index: <($($A,)* NewAxis,) as AsIndex>::Index) -> <($($B,)*) as AsIndex>::Index {
+                <($($A,)*) as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index)
             }
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
         {
             type Error = <($($A,)*) as BroadcastInto<($($B,)*)>>::Error;
-            fn can_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
                 let ($($a,)* _,) = self;
                 let ($($b,)* _,) = other;
-                ($($a,)*).can_broadcast_into(($($b,)*))
+                ($($a,)*).check_broadcast_into(($($b,)*))
             }
         }
         //impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* NewAxis,) { ! }
-        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoShape<($($B,)* Const<N>,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<($($B,)*)>,
+        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoConcrete<($($B,)* Const<N>,)> for ($($A,)* NewAxis,)
+            where ($($A,)*): BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
         {
-            fn into_index(index: <($($A,)* NewAxis,) as AsIndex>::Index) -> <($($B,)* Const<N>,) as AsIndex>::Index {
-                <($($A,)*) as BroadcastIntoShape<($($B,)*)>>::into_index(index).append(0)
+            fn convert_index(index: <($($A,)* NewAxis,) as AsIndex>::Index) -> <($($B,)* Const<N>,) as AsIndex>::Index {
+                <($($A,)*) as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index).append(0)
             }
         }
 
         impl<$($A,)* $($B,)*> BroadcastInto<($($B,)* usize,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
         {
             type Error = <($($A,)*) as BroadcastInto<($($B,)*)>>::Error;
-            fn can_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
                 let ($($a,)* _,) = self;
                 let ($($b,)* _,) = other;
-                ($($a,)*).can_broadcast_into(($($b,)*))
+                ($($a,)*).check_broadcast_into(($($b,)*))
             }
         }
         //impl<$($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* NewAxis,) { ! }
-        impl<$($A,)* $($B,)*> BroadcastIntoShape<($($B,)* usize,)> for ($($A,)* NewAxis,)
-            where ($($A,)*): BroadcastIntoShape<($($B,)*)>,
+        impl<$($A,)* $($B,)*> BroadcastIntoConcrete<($($B,)* usize,)> for ($($A,)* NewAxis,)
+            where ($($A,)*): BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* NewAxis,): Shape<Index=<($($A,)*) as AsIndex>::Index>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
         {
-            fn into_index(index: <($($A,)* NewAxis,) as AsIndex>::Index) -> <($($B,)* usize,) as AsIndex>::Index {
-                <($($A,)*) as BroadcastIntoShape<($($B,)*)>>::into_index(index).append(0)
+            fn convert_index(index: <($($A,)* NewAxis,) as AsIndex>::Index) -> <($($B,)* usize,) as AsIndex>::Index {
+                <($($A,)*) as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index).append(0)
             }
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
         {
             type Error = <($($A,)*) as BroadcastInto<($($B,)*)>>::Error;
-            fn can_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
                 let ($($a,)* _,) = self;
                 let ($($b,)* _,) = other;
-                ($($a,)*).can_broadcast_into(($($b,)*))
+                ($($a,)*).check_broadcast_into(($($b,)*))
             }
         }
         impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* Const<N>,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
         {}
-        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoShape<($($B,)* Const<N>,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoConcrete<($($B,)* Const<N>,)> for ($($A,)* Const<N>,)
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
         {
-            fn into_index(index: <($($A,)* Const<N>,) as AsIndex>::Index) -> <($($B,)* Const<N>,) as AsIndex>::Index {
+            fn convert_index(index: <($($A,)* Const<N>,) as AsIndex>::Index) -> <($($B,)* Const<N>,) as AsIndex>::Index {
                 let (index_rest, index_last) = index.split();
-                <($($A,)*) as BroadcastIntoShape<($($B,)*)>>::into_index(index_rest).append(index_last)
+                <($($A,)*) as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index_rest).append(index_last)
             }
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* usize,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {
             type Error = BroadcastError;
-            fn can_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
                 let ($($a,)* _,) = self;
                 let ($($b,)* b,) = other;
-                ($($a,)*).can_broadcast_into(($($b,)*))?;
+                ($($a,)*).check_broadcast_into(($($b,)*))?;
                 if N != b {
                     return Err(BroadcastError(N, b));
                 }
@@ -705,37 +925,37 @@ macro_rules! impl_broadcast_into_ab {
             }
         }
         impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* usize,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {}
-        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoShape<($($B,)* usize,)> for ($($A,)* Const<N>,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoConcrete<($($B,)* usize,)> for ($($A,)* Const<N>,)
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* Const<N>,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {
-            fn into_index(index: <($($A,)* Const<N>,) as AsIndex>::Index) -> <($($B,)* usize,) as AsIndex>::Index {
+            fn convert_index(index: <($($A,)* Const<N>,) as AsIndex>::Index) -> <($($B,)* usize,) as AsIndex>::Index {
                 let (index_rest, index_last) = index.split();
-                <($($A,)*) as BroadcastIntoShape<($($B,)*)>>::into_index(index_rest).append(index_last)
+                <($($A,)*) as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index_rest).append(index_last)
             }
         }
 
         impl<const N: usize, $($A,)* $($B,)*> BroadcastInto<($($B,)* Const<N>,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {
             type Error = BroadcastError;
-            fn can_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* Const<N>,)) -> Result<(), Self::Error> {
                 let ($($a,)* a,) = self;
                 let ($($b,)* _,) = other;
-                ($($a,)*).can_broadcast_into(($($b,)*))?;
+                ($($a,)*).check_broadcast_into(($($b,)*))?;
                 if a != N {
                     return Err(BroadcastError(a, N));
                 }
@@ -743,37 +963,37 @@ macro_rules! impl_broadcast_into_ab {
             }
         }
         impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* Const<N>,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {}
-        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoShape<($($B,)* Const<N>,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+        impl<const N: usize, $($A,)* $($B,)*> BroadcastIntoConcrete<($($B,)* Const<N>,)> for ($($A,)* usize,)
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* Const<N>,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {
-            fn into_index(index: <($($A,)* usize,) as AsIndex>::Index) -> <($($B,)* Const<N>,) as AsIndex>::Index {
+            fn convert_index(index: <($($A,)* usize,) as AsIndex>::Index) -> <($($B,)* Const<N>,) as AsIndex>::Index {
                 let (index_rest, index_last) = index.split();
-                <($($A,)*) as BroadcastIntoShape<($($B,)*)>>::into_index(index_rest).append(index_last)
+                <($($A,)*) as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index_rest).append(index_last)
             }
         }
 
         impl<$($A,)* $($B,)*> BroadcastInto<($($B,)* usize,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {
             type Error = BroadcastError;
-            fn can_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
+            fn check_broadcast_into(self, other: ($($B,)* usize,)) -> Result<(), Self::Error> {
                 let ($($a,)* a,) = self;
                 let ($($b,)* b,) = other;
-                ($($a,)*).can_broadcast_into(($($b,)*))?;
+                ($($a,)*).check_broadcast_into(($($b,)*))?;
                 if a != b {
                     return Err(BroadcastError(a, b));
                 }
@@ -781,22 +1001,22 @@ macro_rules! impl_broadcast_into_ab {
             }
         }
         impl<$($A,)* $($B,)*> BroadcastIntoNoAlias<($($B,)* usize,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)> + BroadcastIntoNoAlias<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {}
-        impl<$($A,)* $($B,)*> BroadcastIntoShape<($($B,)* usize,)> for ($($A,)* usize,)
-            where ($($A,)*): Shape<Index: Push> + BroadcastIntoShape<($($B,)*)>,
+        impl<$($A,)* $($B,)*> BroadcastIntoConcrete<($($B,)* usize,)> for ($($A,)* usize,)
+            where ($($A,)*): Shape<Index: Push> + BroadcastIntoConcrete<($($B,)*)>,
                   ($($B,)*): Shape<Index: Push>,
                   ($($A,)* usize,): Shape<Index=<<($($A,)*) as AsIndex>::Index as Push>::OneBigger>,
                   ($($B,)* usize,): Shape<Index=<<($($B,)*) as AsIndex>::Index as Push>::OneBigger>,
                   BroadcastError: From<<($($A,)*) as BroadcastInto<($($B,)*)>>::Error>,
         {
-            fn into_index(index: <($($A,)* usize,) as AsIndex>::Index) -> <($($B,)* usize,) as AsIndex>::Index {
+            fn convert_index(index: <($($A,)* usize,) as AsIndex>::Index) -> <($($B,)* usize,) as AsIndex>::Index {
                 let (index_rest, index_last) = index.split();
-                <($($A,)*) as BroadcastIntoShape<($($B,)*)>>::into_index(index_rest).append(index_last)
+                <($($A,)*) as BroadcastIntoConcrete<($($B,)*)>>::convert_index(index_rest).append(index_last)
             }
         }
     };
@@ -811,23 +1031,6 @@ impl_broadcast_into_ab!(a0 A0 a1 A1,b0 B0);
 impl_broadcast_into_ab!(,b0 B0 b1 B1);
 impl_broadcast_into_ab!(a0 A0,b0 B0 b1 B1);
 impl_broadcast_into_ab!(a0 A0 a1 A1,b0 B0 b1 B1);
-
-#[derive(Clone, Copy, Debug)]
-pub struct AnyShape;
-
-impl BroadcastInto<AnyShape> for AnyShape {
-    type Error = convert::Infallible;
-    fn can_broadcast_into(self, _other: AnyShape) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
-
-impl<S: Shape> BroadcastInto<S> for AnyShape {
-    type Error = convert::Infallible;
-    fn can_broadcast_into(self, _other: S) -> Result<(), Self::Error> {
-        Ok(())
-    }
-}
 
 // BroadcastWith
 
@@ -1104,13 +1307,6 @@ impl_broadcast_with_ab!(a0 A0 a1 A1,b0 B0 b1 B1);
 
 // BroadcastTogether
 
-pub trait BroadcastTogether {
-    type Output;
-    type Error: fmt::Debug;
-
-    fn broadcast_together(self) -> Result<Self::Output, Self::Error>;
-}
-
 impl BroadcastTogether for () {
     type Output = ();
     type Error = convert::Infallible;
@@ -1144,50 +1340,29 @@ impl_broadcast_together!(a0 A0);
 impl_broadcast_together!(a0 A0 a1 A1);
 impl_broadcast_together!(a0 A0 a1 A1 a2 A2);
 
-pub trait Build {
-    type Output;
-    type Error: fmt::Debug;
-
-    fn build(self) -> Result<Self::Output, Self::Error>;
-}
-
-pub trait BuildWithShape<S: Shape> {
-    type Output;
-    type Error: fmt::Debug;
-
-    fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error>;
-}
-
-pub trait Shaped {
-    type Shape;
-    type Error: fmt::Debug;
-
-    fn shape(&self) -> Result<Self::Shape, Self::Error>;
-}
-
-impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D>> Shaped for &Array<S, D2> {
+impl<S: Shape, D: ?Sized, D2: ops::Deref<Target = D>> CalculateShape for &Array<S, D2> {
     type Shape = S;
     type Error = convert::Infallible;
 
-    fn shape(&self) -> Result<Self::Shape, Self::Error> {
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
         Ok(self.shape)
     }
 }
 
-impl<S: Shape, D: ?Sized> Shaped for &View<'_, S, D> {
+impl<S: Shape, D: ?Sized> CalculateShape for &View<'_, S, D> {
     type Shape = S;
     type Error = convert::Infallible;
 
-    fn shape(&self) -> Result<Self::Shape, Self::Error> {
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
         Ok(self.shape)
     }
 }
 
-impl<S: Shape, D: ?Sized> Shaped for &ViewMut<'_, S, D> {
+impl<S: Shape, D: ?Sized> CalculateShape for &ViewMut<'_, S, D> {
     type Shape = S;
     type Error = convert::Infallible;
 
-    fn shape(&self) -> Result<Self::Shape, Self::Error> {
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
         Ok(self.shape)
     }
 }
@@ -1206,18 +1381,18 @@ impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D>> Build for &'a Arr
     }
 }
 
-impl<'a, S: Shape, S2: BroadcastIntoShape<S>, D: ?Sized + 'a, D2: ops::Deref<Target = D>>
+impl<'a, S: Shape, S2: BroadcastIntoConcrete<S>, D: ?Sized + 'a, D2: ops::Deref<Target = D>>
     BuildWithShape<S> for &'a Array<S2, D2>
 {
     type Output = View<'a, S, D>;
     type Error = <S2 as BroadcastInto<S>>::Error;
 
     fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
-        self.shape.can_broadcast_into(shape)?;
+        self.shape.check_broadcast_into(shape)?;
         Ok(View {
             shape,
             offset: self.offset,
-            strides: S2::into_index(self.strides),
+            strides: S2::convert_index(self.strides),
             data: &self.data,
         })
     }
@@ -1237,16 +1412,18 @@ impl<'a, S: Shape, D: ?Sized> Build for &'a View<'a, S, D> {
     }
 }
 
-impl<'a, S: Shape, S2: BroadcastIntoShape<S>, D: ?Sized> BuildWithShape<S> for &'a View<'a, S2, D> {
+impl<'a, S: Shape, S2: BroadcastIntoConcrete<S>, D: ?Sized> BuildWithShape<S>
+    for &'a View<'a, S2, D>
+{
     type Output = View<'a, S, D>;
     type Error = <S2 as BroadcastInto<S>>::Error;
 
     fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
-        self.shape.can_broadcast_into(shape)?;
+        self.shape.check_broadcast_into(shape)?;
         Ok(View {
             shape,
             offset: self.offset,
-            strides: S2::into_index(self.strides),
+            strides: S2::convert_index(self.strides),
             data: self.data,
         })
     }
@@ -1266,18 +1443,18 @@ impl<'a, S: Shape, D: ?Sized> Build for &'a ViewMut<'a, S, D> {
     }
 }
 
-impl<'a, S: Shape, S2: BroadcastIntoShape<S>, D: ?Sized> BuildWithShape<S>
+impl<'a, S: Shape, S2: BroadcastIntoConcrete<S>, D: ?Sized> BuildWithShape<S>
     for &'a ViewMut<'a, S2, D>
 {
     type Output = View<'a, S, D>;
     type Error = <S2 as BroadcastInto<S>>::Error;
 
     fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
-        self.shape.can_broadcast_into(shape)?;
+        self.shape.check_broadcast_into(shape)?;
         Ok(View {
             shape,
             offset: self.offset,
-            strides: S2::into_index(self.strides),
+            strides: S2::convert_index(self.strides),
             data: self.data,
         })
     }
@@ -1302,7 +1479,7 @@ impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D> + ops::DerefMut<Ta
 impl<
         'a,
         S: Shape,
-        S2: BroadcastIntoShape<S> + BroadcastIntoNoAlias<S>,
+        S2: BroadcastIntoConcrete<S> + BroadcastIntoNoAlias<S>,
         D: ?Sized + 'a,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > BuildWithShape<S> for &'a mut Array<S2, D2>
@@ -1311,11 +1488,11 @@ impl<
     type Error = <S2 as BroadcastInto<S>>::Error;
 
     fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
-        self.shape.can_broadcast_into(shape)?;
+        self.shape.check_broadcast_into(shape)?;
         Ok(ViewMut {
             shape,
             offset: self.offset,
-            strides: S2::into_index(self.strides),
+            strides: S2::convert_index(self.strides),
             data: &mut self.data,
         })
     }
@@ -1335,38 +1512,38 @@ impl<'a, S: Shape, D: ?Sized> Build for &'a mut ViewMut<'a, S, D> {
     }
 }
 
-impl<'a, S: Shape, S2: BroadcastIntoShape<S> + BroadcastIntoNoAlias<S>, D: ?Sized> BuildWithShape<S>
-    for &'a mut ViewMut<'a, S2, D>
+impl<'a, S: Shape, S2: BroadcastIntoConcrete<S> + BroadcastIntoNoAlias<S>, D: ?Sized>
+    BuildWithShape<S> for &'a mut ViewMut<'a, S2, D>
 {
     type Output = ViewMut<'a, S, D>;
     type Error = <S2 as BroadcastInto<S>>::Error;
 
     fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
-        self.shape.can_broadcast_into(shape)?;
+        self.shape.check_broadcast_into(shape)?;
         Ok(ViewMut {
             shape,
             offset: self.offset,
-            strides: S2::into_index(self.strides),
+            strides: S2::convert_index(self.strides),
             data: self.data,
         })
     }
 }
 
-struct OutMarker<T>(T);
+//////////////////////////////////////////////////////
 
-impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> Shaped
-    for OutMarker<&'a mut Array<S, D2>>
+impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>>
+    CalculateShape for Out<&'a mut Array<S, D2>>
 {
     type Shape = S;
     type Error = convert::Infallible;
 
-    fn shape(&self) -> Result<Self::Shape, Self::Error> {
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
         Ok(self.0.shape)
     }
 }
 
 impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> Build
-    for OutMarker<&'a mut Array<S, D2>>
+    for Out<&'a mut Array<S, D2>>
 {
     type Output = ViewMut<'a, S, D>;
     type Error = <&'a mut Array<S, D2> as Build>::Error;
@@ -1379,10 +1556,10 @@ impl<'a, S: Shape, D: 'a + ?Sized, D2: ops::Deref<Target = D> + ops::DerefMut<Ta
 impl<
         'a,
         S: Shape,
-        S2: BroadcastIntoShape<S> + BroadcastIntoNoAlias<S>,
+        S2: BroadcastIntoConcrete<S> + BroadcastIntoNoAlias<S>,
         D: 'a + ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
-    > BuildWithShape<S> for OutMarker<&'a mut Array<S2, D2>>
+    > BuildWithShape<S> for Out<&'a mut Array<S2, D2>>
 {
     type Output = ViewMut<'a, S, D>;
     type Error = <&'a mut Array<S2, D2> as BuildWithShape<S>>::Error;
@@ -1392,16 +1569,16 @@ impl<
     }
 }
 
-impl<'a, S: Shape, D: 'a + ?Sized> Shaped for OutMarker<&'a mut ViewMut<'a, S, D>> {
+impl<'a, S: Shape, D: 'a + ?Sized> CalculateShape for Out<&'a mut ViewMut<'a, S, D>> {
     type Shape = S;
     type Error = convert::Infallible;
 
-    fn shape(&self) -> Result<Self::Shape, Self::Error> {
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
         Ok(self.0.shape)
     }
 }
 
-impl<'a, S: Shape, D: 'a + ?Sized> Build for OutMarker<&'a mut ViewMut<'a, S, D>> {
+impl<'a, S: Shape, D: 'a + ?Sized> Build for Out<&'a mut ViewMut<'a, S, D>> {
     type Output = ViewMut<'a, S, D>;
     type Error = <&'a mut ViewMut<'a, S, D> as Build>::Error;
 
@@ -1410,8 +1587,8 @@ impl<'a, S: Shape, D: 'a + ?Sized> Build for OutMarker<&'a mut ViewMut<'a, S, D>
     }
 }
 
-impl<'a, S: Shape, S2: BroadcastIntoShape<S> + BroadcastIntoNoAlias<S>, D: 'a + ?Sized>
-    BuildWithShape<S> for OutMarker<&'a mut ViewMut<'a, S2, D>>
+impl<'a, S: Shape, S2: BroadcastIntoConcrete<S> + BroadcastIntoNoAlias<S>, D: 'a + ?Sized>
+    BuildWithShape<S> for Out<&'a mut ViewMut<'a, S2, D>>
 {
     type Output = ViewMut<'a, S, D>;
     type Error = <&'a mut ViewMut<'a, S2, D> as BuildWithShape<S>>::Error;
@@ -1421,30 +1598,30 @@ impl<'a, S: Shape, S2: BroadcastIntoShape<S> + BroadcastIntoNoAlias<S>, D: 'a + 
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> Shaped for OutMarker<AllocShape<S, E>> {
+impl<'a, S: Shape, E: Default + Clone> CalculateShape for Out<AllocShape<S, E>> {
     type Shape = S;
     type Error = convert::Infallible;
 
-    fn shape(&self) -> Result<Self::Shape, Self::Error> {
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
         Ok(self.0.shape)
     }
 }
 
-impl<'a, E: Default + Clone> Shaped for OutMarker<Alloc<E>> {
+impl<'a, E: Default + Clone> CalculateShape for Out<Alloc<E>> {
     type Shape = AnyShape;
     type Error = convert::Infallible;
 
-    fn shape(&self) -> Result<Self::Shape, Self::Error> {
+    fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
         Ok(AnyShape)
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> Build for OutMarker<AllocShape<S, E>> {
+impl<'a, S: Shape, E: Default + Clone> Build for Out<AllocShape<S, E>> {
     type Output = Array<S, Vec<E>>;
     type Error = convert::Infallible;
 
     fn build(self) -> Result<Self::Output, Self::Error> {
-        let OutMarker(AllocShape { shape, .. }) = self;
+        let Out(AllocShape { shape, .. }) = self;
         Ok(Array {
             shape,
             strides: shape.default_strides(),
@@ -1457,16 +1634,16 @@ impl<'a, S: Shape, E: Default + Clone> Build for OutMarker<AllocShape<S, E>> {
 // Can't Build for Alloc since no shape information is available
 
 impl<'a, S: Shape, S2: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> BuildWithShape<S>
-    for OutMarker<AllocShape<S2, E>>
+    for Out<AllocShape<S2, E>>
 {
     type Output = ArrayTarget<S, S2, Vec<E>>;
     type Error = <S2 as BroadcastInto<S>>::Error;
 
     fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
-        let OutMarker(AllocShape {
+        let Out(AllocShape {
             shape: self_shape, ..
         }) = self;
-        self_shape.can_broadcast_into(shape)?;
+        self_shape.check_broadcast_into(shape)?;
         Ok(ArrayTarget {
             shape,
             array: Array {
@@ -1479,7 +1656,7 @@ impl<'a, S: Shape, S2: Shape + BroadcastIntoNoAlias<S>, E: Default + Clone> Buil
     }
 }
 
-impl<'a, S: Shape, E: Default + Clone> BuildWithShape<S> for OutMarker<Alloc<E>> {
+impl<'a, S: Shape, E: Default + Clone> BuildWithShape<S> for Out<Alloc<E>> {
     type Output = Array<S, Vec<E>>;
     type Error = convert::Infallible;
 
@@ -1492,8 +1669,6 @@ impl<'a, S: Shape, E: Default + Clone> BuildWithShape<S> for OutMarker<Alloc<E>>
         })
     }
 }
-
-pub struct Broadcast<T>(T);
 
 macro_rules! impl_broadcast_builder {
     () => {
@@ -1514,42 +1689,44 @@ macro_rules! impl_broadcast_builder {
             type Error = <() as BroadcastInto<S>>::Error;
 
             fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
-                ().can_broadcast_into(shape)
+                ().check_broadcast_into(shape)
             }
         }
     };
 
     ($($a:ident $A:ident)*) => {
-        impl<$($A,)* O: Shape> Shaped for Broadcast<($($A,)*)>
+        impl<$($A,)* O: Shape, E: error::Error> CalculateShape for Broadcast<($($A,)*)>
         where
-            $($A: Shaped,)*
+            $($A: CalculateShape,)*
             ($($A::Shape,)*): BroadcastTogether<Output=O>,
-            $(BroadcastError: From<<$A as Shaped>::Error>,)* // TEMP
-            BroadcastError: From<<($($A::Shape,)*) as BroadcastTogether>::Error>, // TEMP
+            (<($($A::Shape,)*) as BroadcastTogether>::Error,): CommonError<Error=E>,
+            $(E: From<<$A as CalculateShape>::Error>,)*
+            E: From<<($($A::Shape,)*) as BroadcastTogether>::Error>,
         {
             type Shape = O;
-            type Error = BroadcastError; // TODO make this generic
+            type Error = E;
 
-            fn shape(&self) -> Result<Self::Shape, Self::Error> {
+            fn calculate_shape(&self) -> Result<Self::Shape, Self::Error> {
                 let ($($a,)*) = &self.0;
                 Ok(($(
-                    $a.shape()?,
+                    $a.calculate_shape()?,
                 )*).broadcast_together()?)
             }
         }
 
-        impl<$($A,)*> Build for Broadcast<($($A,)*)>
+        impl<$($A,)* E: error::Error> Build for Broadcast<($($A,)*)>
         where
-            Self: Shaped<Shape: Shape>,
-            $($A: BuildWithShape<<Self as Shaped>::Shape>,)*
-            BroadcastError: From<<Self as Shaped>::Error>, // TEMP
-            $(BroadcastError: From<<$A as BuildWithShape<<Self as Shaped>::Shape>>::Error>,)* // TEMP
+            Self: CalculateShape<Shape: Shape>,
+            $($A: BuildWithShape<<Self as CalculateShape>::Shape>,)*
+            (<Self as CalculateShape>::Error, $(<$A as BuildWithShape<<Self as CalculateShape>::Shape>>::Error,)*): CommonError<Error=E>,
+            E: From<<Self as CalculateShape>::Error>,
+            $(E: From<<$A as BuildWithShape<<Self as CalculateShape>::Shape>>::Error>,)*
         {
-            type Output = ($(<$A as BuildWithShape<<Self as Shaped>::Shape>>::Output,)*);
-            type Error = BroadcastError; // TODO make this generic
+            type Output = ($(<$A as BuildWithShape<<Self as CalculateShape>::Shape>>::Output,)*);
+            type Error = E;
 
             fn build(self) -> Result<Self::Output, Self::Error> {
-                let shape = self.shape()?;
+                let shape = self.calculate_shape()?;
                 let ($($a,)*) = self.0;
                 Ok(($(
                     $a.build_with_shape(shape)?,
@@ -1557,14 +1734,15 @@ macro_rules! impl_broadcast_builder {
             }
         }
 
-        impl<$($A,)* S: Shape> BuildWithShape<S> for Broadcast<($($A,)*)>
+        impl<$($A,)* S: Shape, E: error::Error> BuildWithShape<S> for Broadcast<($($A,)*)>
         where
-            Self: Shaped,
+            Self: CalculateShape,
             $($A: BuildWithShape<S>,)*
-            $(BroadcastError: From<<$A as BuildWithShape<S>>::Error>,)* // TEMP
+            ($(<$A as BuildWithShape<S>>::Error,)*): CommonError<Error=E>,
+            $(E: From<<$A as BuildWithShape<S>>::Error>,)*
         {
             type Output = ($(<$A as BuildWithShape<S>>::Output,)*);
-            type Error = BroadcastError; // TODO make this generic
+            type Error = E;
 
             fn build_with_shape(self, shape: S) -> Result<Self::Output, Self::Error> {
                 let ($($a,)*) = self.0;
@@ -1742,21 +1920,6 @@ pub struct View<'a, S: Shape, D: ?Sized> {
     data: &'a D,
 }
 
-impl<'a, S: Shape, D: ?Sized> View<'a, S, D> {
-    pub fn broadcast_into_fail<S2: Shape>(self, shape: S2) -> View<'a, S2, D>
-    where
-        S: BroadcastIntoShape<S2>,
-    {
-        self.shape.broadcast_into_fail(shape);
-        View {
-            shape,
-            offset: self.offset,
-            strides: S::into_index(self.strides),
-            data: self.data,
-        }
-    }
-}
-
 /// A mutable view into multi-dimensional data.
 ///
 /// This type holds an mutable reference the underlying data.
@@ -1768,21 +1931,6 @@ pub struct ViewMut<'a, S: Shape, D: ?Sized> {
     offset: usize,
     strides: S::Index,
     data: &'a mut D,
-}
-
-impl<'a, S: Shape, D: ?Sized> ViewMut<'a, S, D> {
-    pub fn broadcast_into_fail<S2: Shape>(self, shape: S2) -> ViewMut<'a, S2, D>
-    where
-        S: BroadcastIntoShape<S2> + BroadcastIntoNoAlias<S2>,
-    {
-        self.shape.broadcast_into_fail(shape);
-        ViewMut {
-            shape,
-            offset: self.offset,
-            strides: S::into_index(self.strides),
-            data: self.data,
-        }
-    }
 }
 
 /////////////////////////////////////////////
@@ -2065,7 +2213,7 @@ pub struct ArrayTarget<S: Shape, S2: Shape + BroadcastInto<S>, D> {
 impl<
         'a,
         S: Shape,
-        S2: BroadcastIntoShape<S> + BroadcastIntoNoAlias<S>,
+        S2: BroadcastIntoConcrete<S> + BroadcastIntoNoAlias<S>,
         D: ?Sized,
         D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>,
     > OutTarget for ArrayTarget<S, S2, D2>
@@ -2078,7 +2226,7 @@ impl<
         ViewMut {
             shape: self.shape,
             offset: self.array.offset,
-            strides: S2::into_index(self.array.strides),
+            strides: S2::convert_index(self.array.strides),
             data: &mut self.array.data,
         }
     }
@@ -2139,12 +2287,43 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 
 /////////////////////////////////////////////
 
+pub trait CommonError {
+    type Error;
+}
+
+impl CommonError for () {
+    type Error = convert::Infallible;
+}
+
+macro_rules! impl_common_error {
+    ($($a:ident $A:ident)*) => {
+        impl<$($A,)*> CommonError for ($($A,)* convert::Infallible,)
+            where ($($A,)*): CommonError
+        {
+            type Error = <($($A,)*) as CommonError>::Error;
+        }
+
+        impl<$($A,)*> CommonError for ($($A,)* BroadcastError,)
+            where ($($A,)*): CommonError
+        {
+            type Error = BroadcastError;
+        }
+    };
+}
+
+impl_common_error!();
+impl_common_error!(a0 A0);
+impl_common_error!(a0 A0 a1 A1);
+impl_common_error!(a0 A0 a1 A1 a2 A2);
+
+/////////////////////////////////////////////
+
 #[cfg(test)]
 mod test {
 
     use crate::{
         alloc, alloc_shape, Array, AsIndex, Broadcast, BroadcastTogether, Build, Const,
-        DefiniteRange, NewAxis, OutMarker, OutTarget, Shape, View,
+        DefiniteRange, NewAxis, Out, OutTarget, Shape, View,
     };
 
     #[test]
@@ -2181,10 +2360,9 @@ mod test {
             out: B,
         ) -> Result<O::Output, E>
         where
-            for<'a> Broadcast<(&'a A, OutMarker<B>)>:
-                Build<Output = (View<'a, S, [f32]>, O), Error = E>,
+            for<'a> Broadcast<(&'a A, Out<B>)>: Build<Output = (View<'a, S, [f32]>, O), Error = E>,
         {
-            let (c_m, mut out_target) = Broadcast((c_m, OutMarker(out))).build()?;
+            let (c_m, mut out_target) = Broadcast((c_m, Out(out))).build()?;
             let mut out = out_target.view_mut();
 
             // XXX
@@ -2225,18 +2403,16 @@ mod test {
         };
 
         let mut b = Array {
-            shape: (2, 2),
+            shape: (Const::<2>, Const::<2>),
             strides: (2, 2).default_strides(),
             offset: 0,
             data: vec![0.; 4],
         };
 
-        bernstein_coef(&a, &mut b).unwrap();
-
-        dbg!(bernstein_coef(&a, alloc()).unwrap());
-        dbg!(bernstein_coef(&a, alloc_shape((2, 2))).unwrap());
-
-        bernstein_coef(&a, &mut b).unwrap();
+        let Ok(_) = bernstein_coef(&a, &mut b);
+        let Ok(_) = bernstein_coef(&a, alloc());
+        let Ok(_) = bernstein_coef(&a, alloc_shape((Const::<2>, Const::<2>)));
+        bernstein_coef(&a, alloc_shape((2, 2))).unwrap();
     }
 
     #[test]
@@ -2273,10 +2449,10 @@ mod test {
             out: C,
         ) -> Result<O::Output, E>
         where
-            for<'a> Broadcast<(&'a A, &'a B, OutMarker<C>)>:
+            for<'a> Broadcast<(&'a A, &'a B, Out<C>)>:
                 Build<Output = (View<'a, S, [f32]>, View<'a, S, [f32]>, O), Error = E>,
         {
-            let (a, b, mut out_target) = Broadcast((a, b, OutMarker(out))).build()?;
+            let (a, b, mut out_target) = Broadcast((a, b, Out(out))).build()?;
             let mut out = out_target.view_mut();
 
             for (out, (a, b)) in (&mut out).into_iter().zip(a.into_iter().zip(b.into_iter())) {
@@ -2337,9 +2513,9 @@ mod test {
     fn test_ones() {
         fn ones<A, O: OutTarget<Data = [f32]>>(out: A) -> O::Output
         where
-            OutMarker<A>: Build<Output = O>,
+            Out<A>: Build<Output = O>,
         {
-            let mut out_target = OutMarker(out).build().unwrap(); // Infallible?
+            let mut out_target = Out(out).build().unwrap(); // Infallible?
             let mut out = out_target.view_mut();
 
             for e in &mut out {
