@@ -21,68 +21,8 @@ impl<const N: usize> fmt::Debug for Const<N> {
 /// // TODO write a shape example
 pub trait Shape {
     type Index: Index;
-
-    // TODO make this a constant
-    fn as_index() -> Self::Index;
-
-    // Provided methods
-
-    /// How many total elements are contained within multi-dimensional data
-    /// of this shape.
-    ///
-    /// ```
-    /// use nada::Shape;
-    ///
-    /// assert_eq!((3, 4).num_elements(), 12)
-    /// ```
-    // TODO make this a constant
-    fn num_elements() -> usize {
-        Self::as_index().into_iter().product()
-    }
-
-    /// The stride values for multi-dimensional data of this shape.
-    /// This is assuming the data is stored in a C-contiguous fashion,
-    /// where the first axis changes slowest as you traverse the data
-    /// (i.e. has the largest stride.)
-    ///
-    /// ```
-    /// use nada::Shape;
-    ///
-    /// assert_eq!((3, 4).strides(), [4, 1]);
-    /// // moving one unit along the first axis requires a stride of 4 elements,
-    /// // moving one unit along the second axis requires a stride of 1 element.
-    /// ```
-    // TODO make this a constant
-    fn strides() -> Self::Index {
-        let mut result = Self::Index::zero();
-        let mut acc = 1;
-        for (r, d) in result
-            .iter_mut()
-            .rev()
-            .zip(Self::as_index().into_iter().rev())
-        {
-            *r = acc;
-            acc *= d;
-        }
-        result
-    }
-
-    /// Panics if the given index is out-of-bounds for data of this shape.
-    ///
-    /// ```
-    /// use nada::Shape;
-    ///
-    /// let shape = (2, 6);
-    /// shape.out_of_bounds_fail(&[1, 5]); // No panic, since 1 < 2 and 5 < 6
-    /// ```
-    fn out_of_bounds_fail(idx: &Self::Index) {
-        let shape = Self::as_index();
-        for (i, s) in idx.into_iter().zip(shape.into_iter()) {
-            if i >= s {
-                panic!("Index out of bounds: index={idx:?} shape={shape:?}");
-            }
-        }
-    }
+    const SHAPE: Self::Index;
+    const STRIDES: Self::Index;
 }
 
 /// Represents the coordinates of an element in multi-dimensional data,
@@ -144,6 +84,21 @@ pub trait Index:
     /// assert_eq!(i, [6, 10]);
     /// ```
     fn iter_mut<'a>(&'a mut self) -> std::slice::IterMut<'a, usize>;
+
+    /// Panics if the given index is out-of-bounds for data of this shape.
+    ///
+    /// ```
+    /// use nada::Index;
+    ///
+    /// [1, 5].out_of_bounds_fail(&[2, 6]); // No panic, since 1 < 2 and 5 < 6
+    /// ```
+    fn out_of_bounds_fail(&self, shape: &Self) {
+        for (i, s) in self.into_iter().zip(shape.into_iter()) {
+            if i >= s {
+                panic!("Index out of bounds: index={self:?} shape={shape:?}");
+            }
+        }
+    }
 }
 
 impl<const N: usize> Index for [usize; N] {
@@ -157,153 +112,24 @@ impl<const N: usize> Index for [usize; N] {
 }
 
 /////////////////////////////////////////////
-
-/// Build this value into a [View] or similar representation
-/// suitable for processing.
-///
-/// This trait is generally used to help bound generic function parameters.
-/// For example, here is a function which takes multi-dimensional data
-/// that is in-memory, has element type `f32`, and could be any shape.
-///
-/// The user may pass:
-/// * `&Array`
-/// * `&ViewMut`
-/// * `&View`
-/// at their convenience.
-/// ```
-/// use nada::{Build, View, Shape};
-/// use std::convert::Infallible;
-///
-/// fn foo<A, S: Shape>(a: &A)
-/// where
-///     for<'a> &'a A: Build<Output = View<'a, S, [f32]>>,
-/// {
-///     a.build();
-///
-///     // Do stuff with `a`
-/// }
-/// ```
-pub trait Build {
-    type Output;
-
-    // Calculate shapes & construct the resulting view(s) (or other representations.)
-    fn build(self) -> Self::Output;
-}
-
-/////////////////////////////////////////////
-// Helper trait for fixed-length array building
-
-/// This fixed-length array can be grown by 1 element
-pub trait Push {
-    type OneBigger: Pop<OneSmaller = Self>;
-
-    /// Return this array with the given element added to the end
-    fn append(self, a: usize) -> Self::OneBigger;
-}
-
-/// This fixed-length array can be shrunk by 1 element
-pub trait Pop {
-    type OneSmaller: Push<OneBigger = Self>;
-
-    /// Return the array with its last element split off
-    fn split(self) -> (Self::OneSmaller, usize);
-}
-
-macro_rules! impl_push_pop {
-    ($n:expr, $($i:expr)*) => {
-        impl Push for [usize; $n] {
-            type OneBigger = [usize; $n+1];
-
-            fn append(self, a: usize) -> Self::OneBigger {
-                [$(self[$i],)* a,]
-            }
-        }
-
-        impl Pop for [usize; $n+1] {
-            type OneSmaller = [usize; $n];
-
-            fn split(self) -> ([usize; $n], usize) {
-                ([$(self[$i],)*], self[$n])
-            }
-        }
-    };
-}
-
-impl_push_pop!(0,);
-impl_push_pop!(1, 0);
-impl_push_pop!(2, 0 1);
-impl_push_pop!(3, 0 1 2);
-impl_push_pop!(4, 0 1 2 3);
-
-/// This tuple can be grown by 1 element
-pub trait TuplePush {
-    type OneBigger<A>: TuplePop<Tail = A, OneSmaller = Self>;
-
-    /// Return this tuple with the given element added to the end
-    fn append<A>(self, a: A) -> Self::OneBigger<A>;
-}
-
-/// This tuple can be shrunk by 1 element
-pub trait TuplePop {
-    type Tail;
-    type OneSmaller: TuplePush<OneBigger<Self::Tail> = Self>;
-
-    /// Return the tuple with its last element split off
-    fn split(self) -> (Self::OneSmaller, Self::Tail);
-}
-
-macro_rules! impl_tuple_push_pop {
-    ($($a:ident $A:ident)*) => {
-        impl<$($A,)*> TuplePush for ($($A,)*) {
-            type OneBigger<A> = ($($A,)* A,);
-
-            fn append<A>(self, a: A) -> Self::OneBigger<A> {
-                let ($($a,)*) = self;
-                ($($a,)* a,)
-            }
-        }
-
-        impl<$($A,)* A,> TuplePop for ($($A,)* A,) {
-            type Tail = A;
-            type OneSmaller = ($($A,)*);
-
-            fn split(self) -> (Self::OneSmaller, Self::Tail) {
-                let ($($a,)* a,) = self;
-                (($($a,)*), a)
-            }
-        }
-    }
-}
-
-impl_tuple_push_pop!();
-impl_tuple_push_pop!(a0 A0);
-impl_tuple_push_pop!(a0 A0 a1 A1);
-
-/////////////////////////////////////////////
 // Shape
 
 impl Shape for () {
     type Index = [usize; 0];
-
-    fn as_index() -> Self::Index {
-        []
-    }
+    const SHAPE: Self::Index = [];
+    const STRIDES: Self::Index = [];
 }
 
 impl<const N0: usize> Shape for (Const<N0>,) {
     type Index = [usize; 1];
-
-    fn as_index() -> Self::Index {
-        [N0]
-    }
+    const SHAPE: Self::Index = [N0];
+    const STRIDES: Self::Index = [1];
 }
 
 impl<const N0: usize, const N1: usize> Shape for (Const<N0>, Const<N1>) {
     type Index = [usize; 2];
-
-    fn as_index() -> Self::Index {
-        [N0, N1]
-    }
+    const SHAPE: Self::Index = [N0, N1];
+    const STRIDES: Self::Index = [N1, 1];
 }
 
 // TODO turn the above into macro
@@ -316,8 +142,8 @@ macro_rules! impl_shape {
         {
             type Index = <<($($A,)*) as Shape>::Index as Push>::OneBigger;
 
-            fn as_index() -> Self::Index {
-                <($($A,)*) as Shape>::as_index().append(N)
+            fn AS_INDEX -> Self::Index {
+                <($($A,)*) as Shape>::AS_INDEX.append(N)
             }
         }
     };
@@ -328,61 +154,53 @@ impl_shape!(a0 A0);
 impl_shape!(a0 A0 a1 A1);
 */
 
-// Build
+// Into
 
-impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D>> Build for &'a Array<S, D2> {
-    type Output = View<'a, S, D>;
-
-    fn build(self) -> Self::Output {
-        View {
-            shape: marker::PhantomData,
-            data: &self.data,
-        }
-    }
-}
-
-impl<'a, S: Shape, D: ?Sized> Build for &'a View<'a, S, D> {
-    type Output = View<'a, S, D>;
-
-    fn build(self) -> Self::Output {
-        View {
-            shape: marker::PhantomData,
-            data: self.data,
-        }
-    }
-}
-
-impl<'a, S: Shape, D: ?Sized> Build for &'a ViewMut<'a, S, D> {
-    type Output = View<'a, S, D>;
-
-    fn build(self) -> Self::Output {
-        View {
-            shape: marker::PhantomData,
-            data: self.data,
-        }
-    }
-}
-
-impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>> Build
-    for &'a mut Array<S, D2>
+impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D>> From<&'a Array<S, D2>>
+    for View<'a, S, D>
 {
-    type Output = ViewMut<'a, S, D>;
-
-    fn build(self) -> Self::Output {
-        ViewMut {
-            shape: marker::PhantomData,
-            data: &mut self.data,
+    fn from(value: &'a Array<S, D2>) -> Self {
+        View {
+            _shape: marker::PhantomData,
+            data: &value.data,
         }
     }
 }
 
-impl<'a, S: Shape, D: ?Sized> Build for &'a mut ViewMut<'a, S, D> {
-    type Output = ViewMut<'a, S, D>;
+impl<'a, S: Shape, D: ?Sized> From<&'a View<'a, S, D>> for View<'a, S, D> {
+    fn from(value: &'a View<'a, S, D>) -> Self {
+        View {
+            _shape: marker::PhantomData,
+            data: value.data,
+        }
+    }
+}
 
-    fn build(self) -> Self::Output {
+impl<'a, S: Shape, D: ?Sized> From<&'a ViewMut<'a, S, D>> for View<'a, S, D> {
+    fn from(value: &'a ViewMut<'a, S, D>) -> Self {
+        View {
+            _shape: marker::PhantomData,
+            data: value.data,
+        }
+    }
+}
+
+impl<'a, S: Shape, D: ?Sized + 'a, D2: ops::Deref<Target = D> + ops::DerefMut<Target = D>>
+    From<&'a mut Array<S, D2>> for ViewMut<'a, S, D>
+{
+    fn from(value: &'a mut Array<S, D2>) -> Self {
         ViewMut {
-            shape: marker::PhantomData,
-            data: self.data,
+            _shape: marker::PhantomData,
+            data: &mut value.data,
+        }
+    }
+}
+
+impl<'a, S: Shape, D: ?Sized> From<&'a mut ViewMut<'a, S, D>> for ViewMut<'a, S, D> {
+    fn from(value: &'a mut ViewMut<'a, S, D>) -> Self {
+        ViewMut {
+            _shape: marker::PhantomData,
+            data: value.data,
         }
     }
 }
@@ -522,7 +340,7 @@ pub struct Array<S: Shape, D> {
 /// or for owned data, see [Array].
 #[derive(Debug)]
 pub struct View<'a, S: Shape, D: ?Sized> {
-    shape: marker::PhantomData<S>,
+    _shape: marker::PhantomData<S>,
     data: &'a D,
 }
 
@@ -533,7 +351,7 @@ pub struct View<'a, S: Shape, D: ?Sized> {
 /// or for owned data, see [Array].
 #[derive(Debug)]
 pub struct ViewMut<'a, S: Shape, D: ?Sized> {
-    shape: marker::PhantomData<S>,
+    _shape: marker::PhantomData<S>,
     data: &'a mut D,
 }
 
@@ -541,14 +359,14 @@ pub struct ViewMut<'a, S: Shape, D: ?Sized> {
 
 impl<S: Shape, E> View<'_, S, [E]> {
     pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
-        self.data.get_unchecked(idx.to_i(&S::strides()))
+        self.data.get_unchecked(idx.to_i(&S::STRIDES))
     }
 }
 
 impl<S: Shape, E> ops::Index<S::Index> for View<'_, S, [E]> {
     type Output = E;
     fn index(&self, idx: S::Index) -> &E {
-        S::out_of_bounds_fail(&idx);
+        idx.out_of_bounds_fail(&S::SHAPE);
         unsafe { self.get_unchecked(idx) }
     }
 }
@@ -559,19 +377,19 @@ impl<'a, S: Shape, E> IntoIterator for &'a View<'_, S, [E]> {
         NdIter {
             shape: marker::PhantomData,
             data: &self.data[..],
-            idx: (..S::as_index()).first(),
+            idx: (..S::SHAPE).first(),
         }
     }
 }
 impl<S: Shape, E> ViewMut<'_, S, [E]> {
     pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
-        self.data.get_unchecked(idx.to_i(&S::strides()))
+        self.data.get_unchecked(idx.to_i(&S::STRIDES))
     }
 }
 impl<S: Shape, E> ops::Index<S::Index> for ViewMut<'_, S, [E]> {
     type Output = E;
     fn index(&self, idx: S::Index) -> &E {
-        S::out_of_bounds_fail(&idx);
+        idx.out_of_bounds_fail(&S::SHAPE);
         unsafe { self.get_unchecked(idx) }
     }
 }
@@ -582,19 +400,19 @@ impl<'a, S: Shape, E> IntoIterator for &'a ViewMut<'_, S, [E]> {
         NdIter {
             shape: marker::PhantomData,
             data: &self.data[..],
-            idx: (..S::as_index()).first(),
+            idx: (..S::SHAPE).first(),
         }
     }
 }
 impl<S: Shape, E, D: ops::Deref<Target = [E]>> Array<S, D> {
     pub unsafe fn get_unchecked(&self, idx: S::Index) -> &E {
-        self.data.as_ref().get_unchecked(idx.to_i(&S::strides()))
+        self.data.as_ref().get_unchecked(idx.to_i(&S::STRIDES))
     }
 }
 impl<S: Shape, E, D: ops::Deref<Target = [E]>> ops::Index<S::Index> for Array<S, D> {
     type Output = E;
     fn index(&self, idx: S::Index) -> &E {
-        S::out_of_bounds_fail(&idx);
+        idx.out_of_bounds_fail(&S::SHAPE);
         unsafe { self.get_unchecked(idx) }
     }
 }
@@ -605,19 +423,19 @@ impl<'a, S: Shape, E: 'a, D: ops::Deref<Target = [E]>> IntoIterator for &'a Arra
         NdIter {
             shape: marker::PhantomData,
             data: &self.data[..],
-            idx: (..S::as_index()).first(),
+            idx: (..S::SHAPE).first(),
         }
     }
 }
 
 impl<S: Shape, E> ViewMut<'_, S, [E]> {
     pub unsafe fn get_unchecked_mut(&mut self, idx: S::Index) -> &mut E {
-        self.data.get_unchecked_mut(idx.to_i(&S::strides()))
+        self.data.get_unchecked_mut(idx.to_i(&S::STRIDES))
     }
 }
 impl<S: Shape, E> ops::IndexMut<S::Index> for ViewMut<'_, S, [E]> {
     fn index_mut(&mut self, idx: S::Index) -> &mut E {
-        S::out_of_bounds_fail(&idx);
+        idx.out_of_bounds_fail(&S::SHAPE);
         unsafe { self.get_unchecked_mut(idx) }
     }
 }
@@ -628,22 +446,20 @@ impl<'a, S: Shape, E> IntoIterator for &'a mut ViewMut<'_, S, [E]> {
         NdIterMut {
             shape: marker::PhantomData,
             data: &mut self.data[..],
-            idx: (..S::as_index()).first(),
+            idx: (..S::SHAPE).first(),
         }
     }
 }
 impl<S: Shape, E, D: ops::Deref<Target = [E]> + ops::DerefMut<Target = [E]>> Array<S, D> {
     pub unsafe fn get_unchecked_mut(&mut self, idx: S::Index) -> &mut E {
-        self.data
-            .as_mut()
-            .get_unchecked_mut(idx.to_i(&S::strides()))
+        self.data.as_mut().get_unchecked_mut(idx.to_i(&S::STRIDES))
     }
 }
 impl<S: Shape, E, D: ops::Deref<Target = [E]> + ops::DerefMut<Target = [E]>> ops::IndexMut<S::Index>
     for Array<S, D>
 {
     fn index_mut(&mut self, idx: S::Index) -> &mut E {
-        S::out_of_bounds_fail(&idx);
+        idx.out_of_bounds_fail(&S::SHAPE);
         unsafe { self.get_unchecked_mut(idx) }
     }
 }
@@ -654,7 +470,7 @@ impl<'a, S: Shape, E: 'a, D: ops::DerefMut<Target = [E]>> IntoIterator for &'a m
         NdIterMut {
             shape: marker::PhantomData,
             data: &mut self.data[..],
-            idx: (..S::as_index()).first(),
+            idx: (..S::SHAPE).first(),
         }
     }
 }
@@ -679,8 +495,8 @@ impl<'a, S: Shape, E> Iterator for NdIter<'a, S, E> {
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.idx?;
 
-        let val = unsafe { self.data.get_unchecked(idx.to_i(&S::strides())) };
-        self.idx = (..S::as_index()).next(idx);
+        let val = unsafe { self.data.get_unchecked(idx.to_i(&S::STRIDES)) };
+        self.idx = (..S::SHAPE).next(idx);
         Some(val)
     }
 }
@@ -702,8 +518,8 @@ impl<'a, S: Shape, E> Iterator for NdIterMut<'a, S, E> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.idx?;
-        let val = unsafe { &mut *(self.data.get_unchecked_mut(idx.to_i(&S::strides())) as *mut E) };
-        self.idx = (..S::as_index()).next(idx);
+        let val = unsafe { &mut *(self.data.get_unchecked_mut(idx.to_i(&S::STRIDES)) as *mut E) };
+        self.idx = (..S::SHAPE).next(idx);
         Some(val)
     }
 }
@@ -715,8 +531,8 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIter<'a, S, E>> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.0.idx?;
-        let val = unsafe { self.0.data.get_unchecked(idx.to_i(&S::strides())) };
-        self.0.idx = (..S::as_index()).next(idx);
+        let val = unsafe { self.0.data.get_unchecked(idx.to_i(&S::STRIDES)) };
+        self.0.idx = (..S::SHAPE).next(idx);
         Some((idx, val))
     }
 }
@@ -726,9 +542,8 @@ impl<'a, S: Shape, E> Iterator for NdEnumerate<NdIterMut<'a, S, E>> {
 
     fn next(&mut self) -> Option<Self::Item> {
         let idx = self.0.idx?;
-        let val =
-            unsafe { &mut *(self.0.data.get_unchecked_mut(idx.to_i(&S::strides())) as *mut E) };
-        self.0.idx = (..S::as_index()).next(idx);
+        let val = unsafe { &mut *(self.0.data.get_unchecked_mut(idx.to_i(&S::STRIDES)) as *mut E) };
+        self.0.idx = (..S::SHAPE).next(idx);
         Some((idx, val))
     }
 }
@@ -755,7 +570,7 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 #[cfg(test)]
 mod test {
 
-    use crate::{Array, Build, Const, DefiniteRange, Shape, View, ViewMut};
+    use crate::{Array, Const, DefiniteRange, Shape, View, ViewMut};
     use std::marker;
 
     #[test]
@@ -787,11 +602,11 @@ mod test {
 
         fn bernstein_coef<A, O, S: Shape>(c_m: &A, out: &mut O)
         where
-            for<'a> &'a A: Build<Output = View<'a, S, [f32]>>,
-            for<'a> &'a mut O: Build<Output = ViewMut<'a, S, [f32]>>,
+            for<'a> &'a A: Into<View<'a, S, [f32]>>,
+            for<'a> &'a mut O: Into<ViewMut<'a, S, [f32]>>,
         {
-            let c_m = c_m.build();
-            let mut out = out.build();
+            let c_m = c_m.into();
+            let mut out = out.into();
 
             // XXX
             //let val1 = c_m[<<V as IntoView>::Shape as Shape>::Index::zero()];
@@ -805,7 +620,7 @@ mod test {
                             .zip(j.into_iter())
                             .map(|(i_n, j_n)| binomial(i_n, j_n))
                             .product();
-                        let den: usize = S::as_index()
+                        let den: usize = S::SHAPE
                             .into_iter()
                             .zip(j.into_iter())
                             .map(|(d_n, j_n)| binomial(d_n, j_n))
@@ -836,11 +651,11 @@ mod test {
     fn test_sum_prod() {
         fn sum_prod<A, B, S: Shape>(in1: &A, in2: &B) -> f32
         where
-            for<'a> &'a A: Build<Output = View<'a, S, [f32]>>,
-            for<'a> &'a B: Build<Output = View<'a, S, [f32]>>,
+            for<'a> &'a A: Into<View<'a, S, [f32]>>,
+            for<'a> &'a B: Into<View<'a, S, [f32]>>,
         {
-            let in1 = in1.build();
-            let in2 = in2.build();
+            let in1 = in1.into();
+            let in2 = in2.into();
 
             in1.into_iter()
                 .zip(in2.into_iter())
@@ -860,13 +675,13 @@ mod test {
     fn test_add() {
         fn add<A, B, O, S: Shape>(a: &A, b: &B, out: &mut O)
         where
-            for<'a> &'a A: Build<Output = View<'a, S, [f32]>>,
-            for<'a> &'a B: Build<Output = View<'a, S, [f32]>>,
-            for<'a> &'a mut O: Build<Output = ViewMut<'a, S, [f32]>>,
+            for<'a> &'a A: Into<View<'a, S, [f32]>>,
+            for<'a> &'a B: Into<View<'a, S, [f32]>>,
+            for<'a> &'a mut O: Into<ViewMut<'a, S, [f32]>>,
         {
-            let a = a.build();
-            let b = b.build();
-            let mut out = out.build();
+            let a = a.into();
+            let b = b.into();
+            let mut out = out.into();
 
             for (out, (a, b)) in (&mut out).into_iter().zip(a.into_iter().zip(b.into_iter())) {
                 *out = a + b;
@@ -897,9 +712,9 @@ mod test {
     fn test_sum() {
         fn sum<A, S: Shape>(a: &A) -> f32
         where
-            for<'a> &'a A: Build<Output = View<'a, S, [f32]>>,
+            for<'a> &'a A: Into<View<'a, S, [f32]>>,
         {
-            let a = a.build();
+            let a = a.into();
 
             a.into_iter().sum()
         }
@@ -916,9 +731,9 @@ mod test {
     fn test_ones() {
         fn ones<O, S: Shape>(out: &mut O)
         where
-            for<'a> &'a mut O: Build<Output = ViewMut<'a, S, [f32]>>,
+            for<'a> &'a mut O: Into<ViewMut<'a, S, [f32]>>,
         {
-            let mut out = out.build();
+            let mut out = out.into();
 
             for e in &mut out {
                 *e = 1.;
