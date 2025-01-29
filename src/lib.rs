@@ -21,6 +21,7 @@ impl<const N: usize> fmt::Debug for Const<N> {
 /// // TODO write a shape example
 pub trait Shape {
     type Index: Index;
+    const DIMS: usize;
     const SHAPE: Self::Index;
     const STRIDES: Self::Index;
 }
@@ -116,22 +117,33 @@ impl<const N: usize> Index for [usize; N] {
 
 impl Shape for () {
     type Index = [usize; 0];
+    const DIMS: usize = 0;
     const SHAPE: Self::Index = [];
     const STRIDES: Self::Index = [];
 }
 
 impl<const N0: usize> Shape for (Const<N0>,) {
     type Index = [usize; 1];
+    const DIMS: usize = 1;
     const SHAPE: Self::Index = [N0];
     const STRIDES: Self::Index = [1];
 }
 
 impl<const N0: usize, const N1: usize> Shape for (Const<N0>, Const<N1>) {
     type Index = [usize; 2];
+    const DIMS: usize = 2;
     const SHAPE: Self::Index = [N0, N1];
     const STRIDES: Self::Index = [N1, 1];
 }
 
+impl<const N0: usize, const N1: usize, const N2: usize> Shape
+    for (Const<N0>, Const<N1>, Const<N2>)
+{
+    type Index = [usize; 3];
+    const DIMS: usize = 3;
+    const SHAPE: Self::Index = [N0, N1, N2];
+    const STRIDES: Self::Index = [N2 * N1, N1, 1];
+}
 // TODO turn the above into macro
 
 /*
@@ -329,7 +341,7 @@ impl<I: Index> DefiniteRange for ops::RangeInclusive<I> {
 /// For a non-owning types, see [View] and [ViewMut],
 #[derive(Debug, Clone)]
 pub struct Array<S: Shape, D> {
-    shape: marker::PhantomData<S>,
+    _shape: marker::PhantomData<S>,
     data: D,
 }
 
@@ -567,6 +579,73 @@ impl<R: DefiniteRange> Iterator for RangeIter<R> {
 
 /////////////////////////////////////////////
 
+impl<const N0: usize, E> From<[E; N0]> for Array<(Const<N0>,), [E; N0]> {
+    fn from(value: [E; N0]) -> Self {
+        Array {
+            _shape: marker::PhantomData,
+            data: value,
+        }
+    }
+}
+
+#[macro_export]
+macro_rules! ndarray {
+    ( $([ $([ $( $elem:expr ),* ]),* ]),* ) => { const {
+        const N0: usize = [$( [ $( [ $( $elem ),* ] ),* ] ),* ].len();
+        const N1: usize = 0$( + [ $( [ $( $elem ),* ] ),* ].len() )?;
+        const N2: usize = 0$($( + [ $( $elem ),* ].len() )?)?;
+
+        let data = [ $( $( $( $elem ),* ),* ),* ];
+
+        $crate::Array {
+            _shape: std::marker::PhantomData::<($crate::Const<N0>, $crate::Const<N1>, $crate::Const<N2>,)>,
+            data,
+        }
+    }};
+
+    ( $([ $( $elem:expr ),* $(,)? ]),* $(,)? ) => { const {
+        const N0: usize = [$([ $( $elem ),* ]),*].len();
+        const N1: usize = 0 $( + [ $( $elem ),* ].len() )?;
+
+        let data = [ $( $( $elem ),* ),* ];
+
+        $crate::Array {
+            _shape: std::marker::PhantomData::<($crate::Const<N0>, $crate::Const<N1>,)>,
+            data,
+        }
+    }};
+
+    ( $( $elem:expr ),* $(,)? ) => { const {
+        const N0: usize = [ $( $elem ),* ].len();
+
+        let data = [ $( $elem ),* ];
+
+        $crate::Array {
+            _shape: std::marker::PhantomData::<($crate::Const<N0>,)>,
+            data,
+        }
+    }};
+}
+/*
+macro_rules! count_rows {
+    ( $( [ $( $elem:expr ),* ] ),* ) => {{
+        let _row_count = [$([$(stringify!($elem)),*]),*].len();
+        _row_count
+    }};
+}
+
+// Helper for counting columns (first row only)
+#[macro_export]
+macro_rules! count_cols {
+    ( $( $elem:expr ),* $(,)? ) => {{
+        let _col_count = [$($(stringify!($elem)),*)?].len();
+        _col_count
+    }};
+}
+*/
+
+/////////////////////////////////////////////
+
 #[cfg(test)]
 mod test {
 
@@ -576,7 +655,7 @@ mod test {
     #[test]
     fn test_iter() {
         let mut t = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![1, 2, 3, 4],
         };
 
@@ -635,12 +714,12 @@ mod test {
         // TEST DATA
 
         let a = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![1., 2., 3., 4.],
         };
 
         let mut b = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![0.; 4],
         };
 
@@ -664,7 +743,7 @@ mod test {
         }
 
         let a = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![1., 2., 3., 4.],
         };
 
@@ -689,17 +768,17 @@ mod test {
         }
 
         let a = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![1., 2., 3., 4.],
         };
 
         let b = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![10., 20., 30., 40.],
         };
 
         let mut c = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![0.; 4],
         };
 
@@ -720,7 +799,7 @@ mod test {
         }
 
         let a = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![1., 2., 3., 4.],
         };
 
@@ -741,7 +820,7 @@ mod test {
         }
 
         let mut a = Array {
-            shape: marker::PhantomData::<(Const<2>, Const<2>)>,
+            _shape: marker::PhantomData::<(Const<2>, Const<2>)>,
             data: vec![1., 2., 3., 4.],
         };
 
