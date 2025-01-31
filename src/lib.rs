@@ -24,6 +24,7 @@ pub trait Shape {
     const DIMS: usize;
     const SHAPE: Self::Index;
     const STRIDES: Self::Index;
+    const NUM_ELEMENTS: usize;
 }
 
 /// Represents the coordinates of an element in multi-dimensional data,
@@ -120,6 +121,7 @@ impl Shape for () {
     const DIMS: usize = 0;
     const SHAPE: Self::Index = [];
     const STRIDES: Self::Index = [];
+    const NUM_ELEMENTS: usize = 1;
 }
 
 impl<const N0: usize> Shape for (Const<N0>,) {
@@ -127,6 +129,7 @@ impl<const N0: usize> Shape for (Const<N0>,) {
     const DIMS: usize = 1;
     const SHAPE: Self::Index = [N0];
     const STRIDES: Self::Index = [1];
+    const NUM_ELEMENTS: usize = N0;
 }
 
 impl<const N0: usize, const N1: usize> Shape for (Const<N0>, Const<N1>) {
@@ -134,6 +137,7 @@ impl<const N0: usize, const N1: usize> Shape for (Const<N0>, Const<N1>) {
     const DIMS: usize = 2;
     const SHAPE: Self::Index = [N0, N1];
     const STRIDES: Self::Index = [N1, 1];
+    const NUM_ELEMENTS: usize = N0 * N1;
 }
 
 impl<const N0: usize, const N1: usize, const N2: usize> Shape
@@ -142,7 +146,59 @@ impl<const N0: usize, const N1: usize, const N2: usize> Shape
     type Index = [usize; 3];
     const DIMS: usize = 3;
     const SHAPE: Self::Index = [N0, N1, N2];
-    const STRIDES: Self::Index = [N2 * N1, N1, 1];
+    const STRIDES: Self::Index = [N1 * N2, N2, 1];
+    const NUM_ELEMENTS: usize = N0 * N1 * N2;
+}
+
+impl<const N0: usize, const N1: usize, const N2: usize, const N3: usize> Shape
+    for (Const<N0>, Const<N1>, Const<N2>, Const<N3>)
+{
+    type Index = [usize; 4];
+    const DIMS: usize = 4;
+    const SHAPE: Self::Index = [N0, N1, N2, N3];
+    const STRIDES: Self::Index = [N1 * N2 * N3, N2 * N3, N3, 1];
+    const NUM_ELEMENTS: usize = N0 * N1 * N2 * N3;
+}
+
+impl<const N0: usize, const N1: usize, const N2: usize, const N3: usize, const N4: usize> Shape
+    for (Const<N0>, Const<N1>, Const<N2>, Const<N3>, Const<N4>)
+{
+    type Index = [usize; 5];
+    const DIMS: usize = 5;
+    const SHAPE: Self::Index = [N0, N1, N2, N3, N4];
+    const STRIDES: Self::Index = [N1 * N2 * N3 * N4, N2 * N3 * N4, N3 * N4, N4, 1];
+    const NUM_ELEMENTS: usize = N0 * N1 * N2 * N3 * N4;
+}
+
+impl<
+        const N0: usize,
+        const N1: usize,
+        const N2: usize,
+        const N3: usize,
+        const N4: usize,
+        const N5: usize,
+    > Shape
+    for (
+        Const<N0>,
+        Const<N1>,
+        Const<N2>,
+        Const<N3>,
+        Const<N4>,
+        Const<N5>,
+    )
+{
+    type Index = [usize; 6];
+    const DIMS: usize = 6;
+    const SHAPE: Self::Index = [N0, N1, N2, N3, N4, N5];
+    const STRIDES: Self::Index = [
+        N1 * N2 * N3 * N4 * N5,
+        N2 * N3 * N4 * N5,
+        N3 * N4 * N5,
+        N4 * N5,
+        N5,
+        1,
+    ];
+    const NUM_ELEMENTS: usize = N0 * N1 * N2 * N3 * N4 * N5;
 }
 // TODO turn the above into macro
 
@@ -590,10 +646,69 @@ impl<const N0: usize, E> From<[E; N0]> for Array<(Const<N0>,), [E; N0]> {
 
 #[macro_export]
 macro_rules! ndarray {
-    ( $([ $([ $( $elem:expr ),* ]),* ]),* ) => { const {
-        const N0: usize = [$( [ $( [ $( $elem ),* ] ),* ] ),* ].len();
-        const N1: usize = 0$( + [ $( [ $( $elem ),* ] ),* ].len() )?;
-        const N2: usize = 0$($( + [ $( $elem ),* ].len() )?)?;
+
+    // ND from repetition
+    ( $val:expr ; $shape:ty ) => { const {
+        $crate::Array {
+            _shape: std::marker::PhantomData::<$shape>,
+            data: [$val; <$shape as $crate::Shape>::NUM_ELEMENTS],
+        }
+    }};
+
+    // 6D from elements
+    ( $([ $([ $([ $([ $([ $( $elem:expr ),* $(,)? ]),* $(,)? ]),* $(,)? ]),* $(,)? ]),* $(,)? ]),* $(,)? ) => { const {
+        const N0: usize = [ $( [ $( [ $( [ $( [ $( [ $( $elem ),* ] ),* ] ),* ] ),* ] ),* ] ),* ].len();
+        const N1: usize = [ $(   $( [ $( [ $( [ $( [ $( $elem ),* ] ),* ] ),* ] ),* ] ),*   ),* ].len() / N0;
+        const N2: usize = [ $(   $(   $( [ $( [ $( [ $( $elem ),* ] ),* ] ),* ] ),*   ),*   ),* ].len() / (N0 * N1);
+        const N3: usize = [ $(   $(   $(   $( [ $( [ $( $elem ),* ] ),* ] ),*   ),*   ),*   ),* ].len() / (N0 * N1 * N2);
+        const N4: usize = [ $(   $(   $(   $(   $( [ $( $elem ),* ] ),*   ),*   ),*   ),*   ),* ].len() / (N0 * N1 * N2 * N3);
+        const N5: usize = [ $(   $(   $(   $(   $(   $( $elem ),*   ),*   ),*   ),*   ),*   ),* ].len() / (N0 * N1 * N2 * N3 * N4);
+
+        let data = [ $( $( $( $( $( $( $elem ),* ),* ),* ),* ),* ),* ];
+
+        $crate::Array {
+            _shape: std::marker::PhantomData::<($crate::Const<N0>, $crate::Const<N1>, $crate::Const<N2>, $crate::Const<N3>, $crate::Const<N4>, $crate::Const<N5>,)>,
+            data,
+        }
+    }};
+
+    // 5D from elements
+    ( $([ $([ $([ $([ $( $elem:expr ),* $(,)? ]),* $(,)? ]),* $(,)? ]),* $(,)? ]),* $(,)? ) => { const {
+        const N0: usize = [ $( [ $( [ $( [ $( [ $( $elem ),* ] ),* ] ),* ] ),* ] ),* ].len();
+        const N1: usize = [ $(   $( [ $( [ $( [ $( $elem ),* ] ),* ] ),* ] ),*   ),* ].len() / N0;
+        const N2: usize = [ $(   $(   $( [ $( [ $( $elem ),* ] ),* ] ),*   ),*   ),* ].len() / (N0 * N1);
+        const N3: usize = [ $(   $(   $(   $( [ $( $elem ),* ] ),*   ),*   ),*   ),* ].len() / (N0 * N1 * N2);
+        const N4: usize = [ $(   $(   $(   $(   $( $elem ),*   ),*   ),*   ),*   ),* ].len() / (N0 * N1 * N2 * N3);
+
+        let data = [ $( $( $( $( $( $elem ),* ),* ),* ),* ),* ];
+
+        $crate::Array {
+            _shape: std::marker::PhantomData::<($crate::Const<N0>, $crate::Const<N1>, $crate::Const<N2>, $crate::Const<N3>, $crate::Const<N4>,)>,
+            data,
+        }
+    }};
+
+    // 4D from elements
+    ( $([ $([ $([ $( $elem:expr ),* $(,)? ]),* $(,)? ]),* $(,)? ]),* $(,)? ) => { const {
+        const N0: usize = [ $( [ $( [ $( [ $( $elem ),* ] ),* ] ),* ] ),* ].len();
+        const N1: usize = [ $(   $( [ $( [ $( $elem ),* ] ),* ] ),*   ),* ].len() / N0;
+        const N2: usize = [ $(   $(   $( [ $( $elem ),* ] ),*   ),*   ),* ].len() / (N0 * N1);
+        const N3: usize = [ $(   $(   $(   $( $elem ),*   ),*   ),*   ),* ].len() / (N0 * N1 * N2);
+
+        let data = [ $( $( $( $( $elem ),* ),* ),* ),* ];
+
+        $crate::Array {
+            _shape: std::marker::PhantomData::<($crate::Const<N0>, $crate::Const<N1>, $crate::Const<N2>, $crate::Const<N3>,)>,
+            data,
+        }
+    }};
+
+    // 3D from elements
+    ( $([ $([ $( $elem:expr ),* $(,)? ]),* $(,)? ]),* $(,)? ) => { const {
+
+        const N0: usize = [ $( [ $( [ $( $elem ),* ] ),* ] ),* ].len();
+        const N1: usize = [ $(   $( [ $( $elem ),* ] ),*   ),* ].len() / N0;
+        const N2: usize = [ $(   $(   $( $elem ),*   ),*   ),* ].len() / (N0 * N1);
 
         let data = [ $( $( $( $elem ),* ),* ),* ];
 
@@ -603,9 +718,10 @@ macro_rules! ndarray {
         }
     }};
 
+    // 2D from elements
     ( $([ $( $elem:expr ),* $(,)? ]),* $(,)? ) => { const {
-        const N0: usize = [$([ $( $elem ),* ]),*].len();
-        const N1: usize = 0 $( + [ $( $elem ),* ].len() )?;
+        const N0: usize = [ $( [ $( $elem ),* ] ),* ].len();
+        const N1: usize = [ $(   $( $elem ),*   ),* ].len() / N0;
 
         let data = [ $( $( $elem ),* ),* ];
 
@@ -615,6 +731,7 @@ macro_rules! ndarray {
         }
     }};
 
+    // 1D from elements
     ( $( $elem:expr ),* $(,)? ) => { const {
         const N0: usize = [ $( $elem ),* ].len();
 
@@ -626,6 +743,7 @@ macro_rules! ndarray {
         }
     }};
 }
+
 /*
 macro_rules! count_rows {
     ( $( [ $( $elem:expr ),* ] ),* ) => {{
@@ -825,5 +943,24 @@ mod test {
         };
 
         ones(&mut a);
+    }
+    #[test]
+    fn test_construct() {
+        let _: Array<(Const<3>,), _> = ndarray![1, 2, 3];
+        let _: Array<(Const<2>, Const<3>), _> = ndarray![[1, 2, 3], [4, 5, 6]];
+
+        let _: Array<(Const<2>, Const<2>, Const<3>), _> =
+            ndarray![[[1, 2, 3], [4, 5, 6]], [[7, 8, 9], [10, 11, 12]]];
+
+        let _: Array<(Const<2>, Const<2>, Const<2>, Const<2>), _> = ndarray![
+            [[[1, 2], [3, 4]], [[5, 6], [7, 8]]],
+            [[[1, 2], [3, 4]], [[5, 6], [7, 8]]]
+        ];
+        let _: Array<(Const<1>, Const<1>, Const<1>, Const<1>), _> = ndarray![[[[42]]]];
+        let _: Array<(Const<1>, Const<1>, Const<1>, Const<1>, Const<1>), _> = ndarray![[[[[42]]]]];
+        let _: Array<(Const<1>, Const<1>, Const<1>, Const<1>, Const<1>, Const<1>), _> =
+            ndarray![[[[[[[42]]]]]]];
+
+        let _ = ndarray![1 + 1; (Const<2>, Const<3>, Const<2>, Const<3>, Const<2>, Const<3>)];
     }
 }
